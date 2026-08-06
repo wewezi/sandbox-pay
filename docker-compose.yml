@@ -1,0 +1,95 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USERNAME:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme}
+      POSTGRES_DB: ${DB_DATABASE:-sandbox_pay}
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  server:
+    build: ./server
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PORT: 3000
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USERNAME: ${DB_USERNAME:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-changeme}
+      DB_DATABASE: ${DB_DATABASE:-sandbox_pay}
+      DB_SYNCHRONIZE: "false"
+      DB_LOGGING: "false"
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
+      JWT_SECRET: ${JWT_SECRET:-}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-1440m}
+      GATEWAY_SECRET: ${GATEWAY_SECRET:-}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
+      ENABLE_SANDBOX: ${ENABLE_SANDBOX:-false}
+      ENABLE_API_DOCS: ${ENABLE_API_DOCS:-false}
+      CLIENT_URL: ${CLIENT_URL:-http://localhost}
+      THROTTLE_TTL_MS: ${THROTTLE_TTL_MS:-60000}
+      THROTTLE_LIMIT: ${THROTTLE_LIMIT:-60}
+      EXCHANGE_RATE_PROVIDER: ${EXCHANGE_RATE_PROVIDER:-open-er-api}
+      EXCHANGE_RATE_CACHE_TTL_MS: ${EXCHANGE_RATE_CACHE_TTL_MS:-3600000}
+      FALLBACK_CNY_TO_USD: ${FALLBACK_CNY_TO_USD:-0.14}
+      EXCHANGE_RATE_MARGIN: ${EXCHANGE_RATE_MARGIN:-1}
+      FEE_RATE_ALIPAY: ${FEE_RATE_ALIPAY:-0.006}
+      FEE_RATE_PAYPAL: ${FEE_RATE_PAYPAL:-0.044}
+      FEE_RATE_NATIVE: ${FEE_RATE_NATIVE:-0}
+      CHANNEL_COST_ALIPAY: ${CHANNEL_COST_ALIPAY:-0.006}
+      CHANNEL_COST_PAYPAL: ${CHANNEL_COST_PAYPAL:-0.044}
+      CHANNEL_COST_NATIVE: ${CHANNEL_COST_NATIVE:-0}
+      FEE_MIN_CENTS: ${FEE_MIN_CENTS:-0}
+      ALIPAY_APP_ID: ${ALIPAY_APP_ID:-}
+      ALIPAY_PRIVATE_KEY: ${ALIPAY_PRIVATE_KEY:-}
+      ALIPAY_PUBLIC_KEY: ${ALIPAY_PUBLIC_KEY:-}
+      ALIPAY_SERVER_URL: ${ALIPAY_SERVER_URL:-https://openapi-sandbox.dl.alipaydev.com/gateway.do}
+      PAYPAL_CLIENT_ID: ${PAYPAL_CLIENT_ID:-}
+      PAYPAL_CLIENT_SECRET: ${PAYPAL_CLIENT_SECRET:-}
+      PAYPAL_ENVIRONMENT: ${PAYPAL_ENVIRONMENT:-sandbox}
+      NATIVE_PAY_QR_URL: ${NATIVE_PAY_QR_URL:-}
+      NATIVE_PAY_ACCOUNT_NAME: ${NATIVE_PAY_ACCOUNT_NAME:-}
+      NATIVE_PAY_ACCOUNT_NO: ${NATIVE_PAY_ACCOUNT_NO:-}
+      NATIVE_PAY_BANK_NAME: ${NATIVE_PAY_BANK_NAME:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+    expose:
+      - "3000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+  client:
+    build: ./client
+    restart: unless-stopped
+    depends_on:
+      server:
+        condition: service_healthy
+    ports:
+      - "80:80"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  db_data:

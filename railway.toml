@@ -1,0 +1,8 @@
+[build]
+method = "docker"
+
+[service]
+name = "server"
+
+[deploy]
+healthcheckPath = "/health"

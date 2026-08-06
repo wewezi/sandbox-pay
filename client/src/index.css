@@ -1,0 +1,186 @@
+@import "tailwindcss";
+@import "@heroui/styles";
+
+/* Use class-based dark mode instead of media query */
+@custom-variant dark (&:is(.dark *));
+
+/* 中性支付产品主题：内容优先，装饰克制 */
+:root, [data-theme="light"] {
+  color-scheme: light;
+  --background: #f6f7f9;
+  --foreground: #18181b;
+  --surface: #ffffff;
+  --surface-secondary: #f4f4f5;
+  --surface-tertiary: #e4e4e7;
+  --overlay: #ffffff;
+  --border: #e4e4e7;
+  --separator: #ececef;
+  --border-hover: #d4d4d8;
+  --muted: #71717a;
+  --accent: #16a34a;
+  --accent-hover: #15803d;
+  --accent-foreground: #ffffff;
+  --success: #16a34a;
+  --success-hover: #15803d;
+  --default: #f4f4f5;
+  --default-hover: #e4e4e7;
+  --default-foreground: #191919;
+  --field-background: #ffffff;
+  --field-foreground: #191919;
+  --field-border: #d4d4d8;
+  --focus: #16a34a;
+  --link: #576b95;
+  --input-bg: #ffffff;
+  --card-bg: #ffffff;
+  --surface-shadow: none;
+  --card-shadow: none;
+  --card-shadow-hover: none;
+  --radius: 0.5rem;
+}
+
+/* 深色模式保留同一套绿灰层级 */
+.dark, [data-theme="dark"] {
+  color-scheme: dark;
+  --background: #101311;
+  --foreground: #f3f5f4;
+  --surface: #181c19;
+  --surface-secondary: #222724;
+  --surface-tertiary: #2b312d;
+  --overlay: #181c19;
+  --border: #2b312d;
+  --separator: #242925;
+  --border-hover: #414943;
+  --muted: #a0a8a2;
+  --accent: #22c55e;
+  --accent-hover: #16a34a;
+  --accent-foreground: #ffffff;
+  --success: #22c55e;
+  --success-hover: #16a34a;
+  --default: #222724;
+  --default-hover: #2b312d;
+  --default-foreground: #f3f5f4;
+  --field-background: #181c19;
+  --field-foreground: #f3f5f4;
+  --field-border: #343b36;
+  --focus: #22c55e;
+  --link: #7ca0d6;
+  --input-bg: #181c19;
+  --card-bg: #181c19;
+  --surface-shadow: none;
+  --card-shadow: none;
+  --card-shadow-hover: none;
+  --radius: 0.5rem;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-surface: var(--surface);
+  --color-surface-secondary: var(--surface-secondary);
+  --color-border: var(--border);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-emerald-50: #f0fdf4;
+  --color-emerald-100: #dcfce7;
+  --color-emerald-200: #bbf7d0;
+  --color-emerald-300: #86efac;
+  --color-emerald-400: #4ade80;
+  --color-emerald-500: #22c55e;
+  --color-emerald-600: #16a34a;
+  --color-emerald-700: #15803d;
+  --color-emerald-800: #166534;
+  --color-emerald-900: #14532d;
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", Arial, sans-serif;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* 主题切换瞬间完成：干掉所有元素的主题相关 transition */
+.theme-switching,
+.theme-switching *,
+.theme-switching *::before,
+.theme-switching *::after {
+  transition: none !important;
+  animation: none !important;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: inherit;
+  letter-spacing: -0.012em;
+}
+
+/* HeroUI Toast 样式覆盖 */
+@layer components {
+  .card:not(.card--transparent) {
+    border: 1px solid var(--border);
+    border-radius: 0.625rem;
+    box-shadow: none;
+  }
+
+  .button {
+    border-radius: 0.5rem;
+    transition-duration: 150ms;
+  }
+
+  .modal__dialog:not([class*="rounded-["]) {
+    border-radius: 0.75rem;
+  }
+
+  /* 精致克制的通知弹窗样式 */
+  .toast {
+    background-color: var(--card-bg) !important;
+    color: var(--foreground) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 0.75rem !important;
+    box-shadow: 0 12px 30px -10px rgba(0, 0, 0, 0.15) !important;
+    padding: 0.75rem 1.25rem !important;
+    font-size: 0.875rem !important;
+    font-weight: 500 !important;
+    display: flex !important;
+    align-items: center !important;
+    gap: 0.75rem !important;
+  }
+  .toast--success {
+    border-left: 4px solid var(--accent) !important;
+  }
+  .toast--danger {
+    border-left: 4px solid #f43f5e !important;
+  }
+  .toast--info {
+    border-left: 4px solid #0ea5e9 !important;
+  }
+}
+
+/* 极简自定义滚动条 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--background);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--surface-secondary);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
+}
+
+::selection {
+  background-color: var(--accent);
+  color: #ffffff;
+}
+
+/* 修复 HeroUI Table 带有表头时，tbody 首行单元格不需要顶部圆角，避免与表头底部冲突 */
+.table__body tr:first-child td:first-child,
+.table__body tr:first-child td:last-child {
+  border-top-left-radius: 0 !important;
+  border-top-right-radius: 0 !important;
+}

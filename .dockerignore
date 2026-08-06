@@ -1,0 +1,10 @@
+node_modules
+.git
+*.md
+.github
+.env*
+server/.env*
+client/.env*
+server/coverage
+client/dist
+server/dist
