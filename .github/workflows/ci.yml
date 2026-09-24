@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@v4
 
       # go.mod 里锁的就是这个版本，装同版本才测得准
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
