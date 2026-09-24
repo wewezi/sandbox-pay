@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>收银台 · Sandbox Pay</title>
+  <link rel="stylesheet" href="/app.css">
+  <!-- 同步加载，且不能是 module：主题属性必须在首次绘制前写上，否则会闪白底。原因见 theme.js -->
+  <script src="/theme.js"></script>
+</head>
+<body>
+  <!--
+    <sp-cashier> 自己拉数据、自己轮询，断开时 abort。
+    刻意不用 shadow DOM：app.css 是全局样式表，套了 shadow root 之后
+    .panel / .amount / .qr 这些类全都进不去。
+  -->
+  <sp-cashier class="cashier">
+    <div class="panel">
+      <p class="muted center">正在加载订单…</p>
+    </div>
+  </sp-cashier>
+
+  <!-- 四个状态各一份结构，cashier.js 只 clone + 填字段。没有 innerHTML，天然符合 CSP。 -->
+  <template id="tpl-pending">
+    <div class="panel">
+      <p class="product" data-product></p>
+      <div class="amount" data-amount></div>
+      <!-- 空内容也占一行高度，倒计时刷新时页面不跳（见 app.css 的 .countdown） -->
+      <div class="countdown" data-countdown> </div>
+      <img class="qr" data-qr alt="付款二维码">
+      <p class="small muted center">用支付宝沙箱客户端扫码，或点下面按钮跳转网关</p>
+      <div class="channels">
+        <button class="primary" data-alipay></button>
+        <button data-paypal>PayPal 支付</button>
+      </div>
+    </div>
+
+    <div class="panel" data-wallet>
+      <h2>沙箱钱包支付</h2>
+      <div class="stack">
+        <div class="field">
+          <label for="walletUser">钱包账号</label>
+          <input id="walletUser" data-wallet-user placeholder="demo_buyer@sandbox-pay.local" autocomplete="username">
+        </div>
+        <div class="field">
+          <label for="walletPass">支付密码</label>
+          <input id="walletPass" data-wallet-pass type="password" placeholder="默认 123456" autocomplete="current-password">
+        </div>
+        <button class="primary block" data-wallet-pay></button>
+        <p class="small muted">留空即用预置体验账户</p>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>订单信息</h2>
+      <div data-details></div>
+      <div class="kv">
+        <span class="k">附言</span>
+        <span class="v mono"><span data-remark></span> <button class="link" data-copy>复制附言</button></span>
+      </div>
+    </div>
+  </template>
+
+  <template id="tpl-paid">
+    <div class="panel result">
+      <div class="icon">✅</div>
+      <h2>支付成功</h2>
+      <div class="amount" data-amount></div>
+      <p class="product" data-product></p>
+    </div>
+    <div class="panel" data-details></div>
+    <div class="panel">
+      <button class="primary block" data-done>完成</button>
+    </div>
+  </template>
+
+  <template id="tpl-closed">
+    <div class="panel result">
+      <div class="icon" data-icon></div>
+      <h2 data-title></h2>
+      <p class="muted" data-message></p>
+    </div>
+    <div class="panel">
+      <div data-details></div>
+      <button class="block" data-back>返回来源页面</button>
+    </div>
+  </template>
+
+  <template id="tpl-error">
+    <div class="panel result">
+      <div class="icon">❌</div>
+      <h2>无法打开收银台</h2>
+      <p class="muted" data-message></p>
+    </div>
+    <div class="panel">
+      <button class="primary block" data-retry>重新加载</button>
+    </div>
+  </template>
+
+  <!-- 订单信息里的一行「键：值」 -->
+  <template id="tpl-kv">
+    <div class="kv">
+      <span class="k" data-k></span>
+      <span class="v mono" data-v></span>
+    </div>
+  </template>
+
+  <template id="tpl-note">
+    <p class="small muted center">沙箱环境，所有支付均为模拟交易，不会产生真实扣款。</p>
+  </template>
+
+  <script type="module" src="/cashier.js"></script>
+</body>
+</html>

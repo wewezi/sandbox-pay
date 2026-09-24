@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>沙箱 · Sandbox Pay</title>
+  <link rel="stylesheet" href="/app.css">
+  <!-- 同步加载，且不能是 module：主题属性必须在首次绘制前写上，否则会闪白底。原因见 theme.js -->
+  <script src="/theme.js"></script>
+</head>
+<body>
+  <header id="topbar"></header>
+
+  <div class="wrap mid">
+    <div class="panel">
+      <h2>测试下单</h2>
+      <form class="row" id="testPay">
+        <div class="field grow">
+          <label for="productName">商品名</label>
+          <input id="productName" placeholder="Sandbox Pay 测试订单">
+        </div>
+        <div class="field sm">
+          <label for="amount">金额（元）</label>
+          <input id="amount" type="number" min="0.01" step="0.01" value="0.01" required>
+        </div>
+        <button class="primary" type="submit">下单并打开收银台</button>
+      </form>
+      <p class="muted small">走种子分组的 native 渠道，可在收银台内切换到支付宝 / PayPal 真实沙箱。不带 notifyUrl，所以不需要 Key 去签回调。</p>
+    </div>
+
+    <div class="panel">
+      <h2>重置数据</h2>
+      <p class="muted small">删除全部订单与通知记录，分组、Key 和管理员账号保留。仅 <span class="mono">ENABLE_SANDBOX=true</span> 时可用。</p>
+      <button class="danger" type="button" id="reset">清空订单与通知</button>
+    </div>
+
+    <p class="muted small center">
+      分组和 API Key 的管理挪到了 <a href="/groups.html">分组与 Key</a>。
+    </p>
+  </div>
+
+  <script type="module" src="/sandbox.js"></script>
+</body>
+</html>

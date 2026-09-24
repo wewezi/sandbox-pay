@@ -8,68 +8,45 @@ on:
 
 jobs:
   server:
-    name: Server — lint, test, build
+    name: Server — vet, test, build
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: server
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: pnpm/action-setup@v4
+      # go.mod 里锁的就是这个版本，装同版本才测得准
+      - uses: actions/setup-go@v5
         with:
-          version: 9
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: pnpm
-          cache-dependency-path: server/pnpm-lock.yaml
-
-      - run: pnpm install --frozen-lockfile
-
-      - name: Lint
-        run: pnpm lint
-
-      - name: Type check
-        run: pnpm build --dry-run || npx tsc --noEmit
-
-      - name: Test
-        run: pnpm test -- --ci --coverage
-        env:
-          JWT_SECRET: ci-test-secret
-          DB_HOST: localhost
-          DB_USERNAME: test
-          DB_DATABASE: test
-
-      - name: Dependency audit
-        run: pnpm audit --audit-level moderate || true
-
-  client:
-    name: Client — lint, build
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: client
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 9
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: pnpm
-          cache-dependency-path: client/pnpm-lock.yaml
-
-      - run: pnpm install --frozen-lockfile
-
-      - name: Lint
-        run: pnpm lint
+      # gofmt 只做格式检查，不写文件。本地忘跑 format 就在 CI 挡下。
+      - name: Format
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "以下文件未格式化（本地跑 gofmt -w . 修复）："
+            echo "$unformatted"
+            exit 1
+          fi
 
       - name: Build
-        run: pnpm build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      # 单测 + e2e 同一条命令。JWT_SECRET 是测试自己灌的，这里给一个
+      # 只是为了让 .env 缺失时的启动路径也有东西可读。
+      - name: Test
+        run: go test ./... -count=1
+        env:
+          JWT_SECRET: ci-test-secret
+          LOG_SILENT: "1"
+
+      # 前端没有构建步骤，类型检查靠 tsc 读 JSDoc。
+      # typescript 是唯一一个 devDependency，npm ci 按 lock 装，可复现。
+      - name: Frontend type check
+        run: |
+          npm ci --no-audit --no-fund
+          npx tsc -p public --noEmit

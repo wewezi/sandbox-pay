@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>通知队列 · Sandbox Pay</title>
+  <link rel="stylesheet" href="/app.css">
+  <!-- 同步加载，且不能是 module：主题属性必须在首次绘制前写上，否则会闪白底。原因见 theme.js -->
+  <script src="/theme.js"></script>
+</head>
+<body>
+  <header id="topbar"></header>
+
+  <div class="wrap">
+    <div class="panel">
+      <form class="row" id="filters">
+        <div class="field sm">
+          <label for="status">状态</label>
+          <select id="status">
+            <option value="">全部</option>
+            <option value="0">待发送</option>
+            <option value="1">成功</option>
+            <option value="2">失败重试中</option>
+            <option value="3">重试耗尽</option>
+          </select>
+        </div>
+        <button class="primary" type="submit">查询</button>
+        <button type="button" id="refresh">刷新</button>
+      </form>
+      <p class="muted small">失败通知按 5s → 15s → 60s → 5min → 15min 指数退避重试，耗尽后可手动重发。</p>
+    </div>
+
+    <div class="panel">
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>订单号</th>
+              <th>回调地址</th>
+              <th>状态</th>
+              <th class="num">重试</th>
+              <th>最近错误</th>
+              <th>最近尝试</th>
+              <th>创建</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <div id="empty" class="empty" hidden>通知队列为空</div>
+      <div id="pager"></div>
+    </div>
+  </div>
+
+  <!-- 行结构写在这里，notifications.js 只 clone + 填字段。没有 innerHTML，天然符合 CSP。 -->
+  <template id="tpl-notify-row">
+    <tr>
+      <td class="mono" data-order></td>
+      <td class="wrapped mono" data-url></td>
+      <td><span class="badge" data-status></span></td>
+      <td class="num" data-retry></td>
+      <td class="wrapped small err-text" data-error></td>
+      <td class="small" data-attempt></td>
+      <td class="small" data-created></td>
+      <td class="acts" data-acts></td>
+    </tr>
+  </template>
+
+  <script type="module" src="/notifications.js"></script>
+</body>
+</html>

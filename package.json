@@ -1,0 +1,14 @@
+{
+  "name": "sandbox-pay",
+  "version": "0.0.1",
+  "description": "Sandbox Pay payment gateway (Go)",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p public --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "~6.0.3"
+  }
+}
