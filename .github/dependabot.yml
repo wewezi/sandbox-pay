@@ -1,7 +1,7 @@
 version: 2
 updates:
-  - package-ecosystem: npm
-    directory: /server
+  - package-ecosystem: gomod
+    directory: /
     schedule:
       interval: weekly
     open-pull-requests-limit: 10
@@ -9,14 +9,15 @@ updates:
       - dependencies
       - server
 
+  # 前端类型检查用的 tsc，写在根 package.json 里
   - package-ecosystem: npm
-    directory: /client
+    directory: /
     schedule:
       interval: weekly
     open-pull-requests-limit: 10
     labels:
       - dependencies
-      - client
+      - frontend
 
   - package-ecosystem: github-actions
     directory: /

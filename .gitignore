@@ -6,10 +6,21 @@ node_modules/
 .env.*
 !.env.example
 
-# Build output
+# Build output（前端没有构建步骤，这些只是留着兜底）
 dist/
 build/
 .next/
+
+# Go
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+# go build -o 的产物
+/sandbox-pay
+/data-backup-*/
 
 # Logs
 logs/
@@ -37,13 +48,15 @@ Thumbs.db
 # Testing
 coverage/
 
-# NestJS
-server/dist/
+# SQLite database files
+/data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
 
-# Vite
-client/dist/
+# Claude Code local plans
+.claude/
 
 # Misc
 *.local
-# heroui-agents-md
-.heroui-docs/

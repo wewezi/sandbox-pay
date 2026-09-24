@@ -1,0 +1,51 @@
+{
+  // 前端的类型检查。这里**不产出任何东西**，也没有构建步骤 ——
+  // 浏览器照旧直接加载 public/ 下的 .js 原文，tsc 只是读 JSDoc 注释来查类型。
+  //
+  // 后端是 Go，没有自己的 tsconfig 可以并，所以前端单独一份：
+  // 这边是 checkJs 的 .js + DOM，跟任何 .ts 项目都对不上。
+  "compilerOptions": {
+    "module": "esnext",
+    // 浏览器里 import 写的是 '/app.js' 这种绝对路径，走 bundler 解析最省事，
+    // 配合下面的 paths 把根路径映到 public/ 目录。
+    "moduleResolution": "bundler",
+    "target": "ES2023",
+    // DOM 在这里，node 的 types 不要 —— 前端没有 process/Buffer
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": [],
+
+    "allowJs": true,
+    // 关键的一条：拿 JSDoc 当类型标注来检查 .js
+    "checkJs": true,
+    "noEmit": true,
+    // api-types.d.ts 是 .d.ts，import type 要允许带扩展名
+    "allowImportingTsExtensions": true,
+
+    "strict": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+
+    // 没有 baseUrl：TS 6 把它标成弃用了，而 paths 在没有 baseUrl 时
+    // 本来就按 tsconfig 所在目录解析 —— 这份就在 public/ 里，正合适。
+    "paths": {
+      // 页面里写的 '/app.js'、'/theme.js' 都是站点根,对应 public/ 本身
+      "/*": ["./*"]
+    }
+  },
+  // 所有页面都进来了。加新页面记得这里的清单、README 里的页面表
+  // 两处一起改 —— 不在这个 include 里的文件不会被类型检查。
+  //
+  // theme.js 不进来：它是 classic script（不能是 module，见文件头注释），
+  // 往 window 上挂全局，契约写在 globals.d.ts 里。
+  "include": [
+    "globals.d.ts",
+    "app.js",
+    "index.js",
+    "login.js",
+    "orders.js",
+    "notifications.js",
+    "groups.js",
+    "sandbox.js",
+    "cashier.js"
+  ]
+}
