@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Mintweft</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/app.css">
+  <!-- 同步加载，且不能是 module：主题属性必须在首次绘制前写上，否则会闪白底。原因见 theme.js -->
+  <script src="/theme.js" vite-ignore></script>
+</head>
+<body>
+  <sp-app></sp-app>
+  <script type="module" src="/index.ts"></script>
+</body>
+</html>

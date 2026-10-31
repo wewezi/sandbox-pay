@@ -9,7 +9,7 @@ updates:
       - dependencies
       - server
 
-  # 前端类型检查用的 tsc，写在根 package.json 里
+  # 前端 Lit / Vite / TypeScript 依赖，写在根 package.json 里
   - package-ecosystem: npm
     directory: /
     schedule:

@@ -177,6 +177,11 @@ func (f *fakeNotify) EnqueueNotification(url string, notification PaymentNotific
 	return nil
 }
 
+func (f *fakeNotify) PrepareNotification(url string, notification PaymentNotification, signingKey string) (db.InsertNotifyInput, error) {
+	f.calls = append(f.calls, notifyCall{url: url, notification: notification, signingKey: signingKey})
+	return (&NotifyService{}).PrepareNotification(url, notification, signingKey)
+}
+
 // ---------------------------------------------------------------------------
 // fake 退款网关 —— refund 测试用（对应 TS 的 alipayService/paypalService mock）
 // ---------------------------------------------------------------------------

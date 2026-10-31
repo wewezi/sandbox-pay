@@ -193,9 +193,10 @@ func TestNotifyService(t *testing.T) {
 			t.Errorf("body.status = %v, want paid", body["status"])
 		}
 		wantHeaders := map[string]string{
-			"X-Sandbox-Pay-Timestamp": "1234567890",
-			"X-Sandbox-Pay-Nonce":     "abc123",
-			"X-Sandbox-Pay-Signature": "sig",
+			"X-Sandbox-Pay-Signature-Version": "1",
+			"X-Sandbox-Pay-Timestamp":         "1234567890",
+			"X-Sandbox-Pay-Nonce":             "abc123",
+			"X-Sandbox-Pay-Signature":         "sig",
 		}
 		for k, want := range wantHeaders {
 			if http.lastPostHeaders[k] != want {

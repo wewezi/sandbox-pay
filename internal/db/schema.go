@@ -2,14 +2,7 @@ package db
 
 // 建表 DDL。
 //
-// 全部 IF NOT EXISTS，启动时无条件执行一遍即可 —— 也就是说这里改了列，
-// 已存在的库不会跟着变。没有迁移脚本这一层，改列名/删列之后老库必须删掉重建：
-//
-//	rm data/sandbox-pay.db*
-//	go run . create-admin <用户名> <密码>
-//
-// groups 先从 appKey + appSecret 合并成单个 apiKey，之后又把凭证从
-// groups 上拆到独立的 api_keys 表，两次都是这么处理的。
+// 首次建库执行基础表；已有库由 migrations.go 进行事务内升级。
 
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS "users" (
@@ -32,7 +25,7 @@ CREATE TABLE IF NOT EXISTS "groups" (
 
 -- 凭证从表。一个分组可以签发多把 Key（轮换 / 多环境），
 -- 入站按 key 全局查找，所以 UNIQUE 在 key 上而不是 (groupId, key)。
--- 停用只改 isActive，不删行 —— 已有订单的回调还要用这把 Key 签名。
+-- key 在版本 3 迁移后保存单向哈希，前后缀和独立回调密钥由迁移增加。
 CREATE TABLE IF NOT EXISTS "api_keys" (
   "id" integer PRIMARY KEY AUTOINCREMENT NOT NULL,
   "groupId" integer NOT NULL,
@@ -63,6 +56,7 @@ CREATE TABLE IF NOT EXISTS "payment_orders" (
   "foreignCurrency" varchar(10),
   "externalOrderNo" varchar(64),
   "thirdPartyTradeNo" varchar(128),
+  "providerOrderId" varchar(128),
   "refundedAmount" integer NOT NULL DEFAULT (0),
   "refundTradeNo" varchar(128),
   "refundAt" datetime,

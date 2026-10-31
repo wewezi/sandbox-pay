@@ -26,7 +26,7 @@ func TestPaymentFlow(t *testing.T) {
 		eq(t, "status", r.Status, http.StatusOK)
 		d := r.data()
 		eq(t, "data.type", str(t, d["type"], "type"), "url")
-		hasSubstr(t, str(t, d["data"], "data"), "/cashier.html?orderNo=", "收银台 URL")
+		hasSubstr(t, str(t, d["data"], "data"), "/cashier?orderNo=", "收银台 URL")
 		if !strings.HasPrefix(no, "PAY") {
 			t.Fatalf("orderNo %q 不以 PAY 开头", no)
 		}
@@ -236,4 +236,31 @@ func TestPaymentFlow(t *testing.T) {
 		hasSubstr(t, str(t, r.obj()["message"], "message"),
 			"property extra should not exist", "400 message")
 	})
+}
+
+func TestCashierPendingReportsCurrentChannel(t *testing.T) {
+	for _, channel := range []string{"native", "alipay", "paypal"} {
+		t.Run(channel, func(t *testing.T) {
+			h := newHarness(t, nil)
+			created, orderNo := h.createOrder(t, map[string]any{
+				"amount": 1.5, "productName": "cashier channel", "payMethod": "native",
+			})
+			eq(t, "create status", created.Status, http.StatusOK)
+			if channel != "native" {
+				// Seed a selected external order independently of transport:
+				// an unconfigured gateway must now retain the native channel.
+				if err := h.store.Orders.Update(orderNo, map[string]any{"payMethod": channel}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cashier := h.do(t, reqSpec{
+				Method: "GET", Path: "/v1/api/native-pay/cashier?orderNo=" + orderNo,
+			})
+			eq(t, "cashier status", cashier.Status, http.StatusOK)
+			data := cashier.data()
+			eq(t, "order status", str(t, data["status"], "status"), "pending")
+			eq(t, "cashier payMethod", str(t, data["payMethod"], "payMethod"), channel)
+			eq(t, "cashier amount", num(t, data["amount"], "amount"), 1.5)
+		})
+	}
 }

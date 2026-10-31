@@ -1,11 +1,15 @@
 package gateways
 
 import (
-	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
+	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/plutov/paypal"
 
@@ -18,7 +22,8 @@ import (
 	"sandbox-pay/internal/services"
 )
 
-// PayPal PayPal 渠道。客户端同样是惰性创建 + 缓存。
+// PayPal is a sandbox-only adapter. OAuth refreshes are serialized, while
+// requests use a copied token and never read the SDK's mutable token state.
 type PayPal struct {
 	cfg      config.Config
 	log      *logger.Logger
@@ -26,227 +31,443 @@ type PayPal struct {
 	rates    *services.ExchangeRateService
 	payments *services.PaymentService
 
-	mu  sync.Mutex
-	cli *paypal.Client
+	mu        sync.Mutex
+	cli       *paypal.Client
+	token     string
+	expiresAt time.Time
+	orderMu   sync.Mutex
 }
 
-// NewPayPal 构造。
 func NewPayPal(cfg config.Config, store *db.Store, rates *services.ExchangeRateService,
 	payments *services.PaymentService) *PayPal {
 	return &PayPal{
-		cfg:      cfg,
-		log:      logger.New("PayPalService"),
-		store:    store,
-		rates:    rates,
-		payments: payments,
+		cfg: cfg, log: logger.New("PayPalService"), store: store,
+		rates: rates, payments: payments,
 	}
 }
 
-// client 取（必要时创建）SDK 客户端。没配凭证报 400，理由同 Alipay.client。
 func (p *PayPal) client() (*paypal.Client, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if config.String(p.cfg, "PAYPAL_ENVIRONMENT") != "sandbox" {
+		return nil, httperr.BadRequest("PayPal 仅支持 sandbox 环境")
+	}
 	if p.cli != nil {
 		return p.cli, nil
 	}
-
 	clientID := strings.TrimSpace(p.cfg.Get("PAYPAL_CLIENT_ID"))
 	secret := strings.TrimSpace(p.cfg.Get("PAYPAL_CLIENT_SECRET"))
 	if clientID == "" || secret == "" {
 		return nil, httperr.BadRequest(
 			"PayPal 渠道未配置，请在 .env 设置 PAYPAL_CLIENT_ID / PAYPAL_CLIENT_SECRET")
 	}
-
-	environment := config.String(p.cfg, "PAYPAL_ENVIRONMENT")
-	base := paypal.APIBaseSandBox
-	if environment == "live" {
-		base = paypal.APIBaseLive
-	}
-	cli, err := paypal.NewClient(clientID, secret, base)
+	cli, err := paypal.NewClient(clientID, secret, paypal.APIBaseSandBox)
 	if err != nil {
 		return nil, err
 	}
-
-	p.log.Log(fmt.Sprintf("PayPal initialized in %s mode", environment))
+	cli.SetHTTPClient(&http.Client{
+		Timeout: 10 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	})
 	p.cli = cli
 	return cli, nil
 }
 
-// CreateOrder 下单，返回 PayPal 的 approve 链接。
-//
-// 美元金额由人民币分按实时汇率折算，并把 (汇率, 美分, USD) 回写订单 ——
-// 退款时要按同一个汇率把部分退款折回美分。
-func (p *PayPal) CreateOrder(orderNo, baseUrl string) (*PayResult, error) {
-	// 先取客户端：没配凭证要以 400 原样抛出，别被下面的失败分支盖成
-	// 「PayPal 下单失败」，而且没配就根本不用碰数据库和汇率接口。
+func (p *PayPal) accessToken(cli *paypal.Client) (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.token != "" && time.Now().Add(30*time.Second).Before(p.expiresAt) {
+		return p.token, nil
+	}
+	token, err := cli.GetAccessToken()
+	if err != nil {
+		return "", err
+	}
+	if token == nil || token.Token == "" || token.ExpiresIn <= 0 ||
+		!strings.EqualFold(token.Type, "Bearer") {
+		return "", invalidGatewayResponse("oauth")
+	}
+	p.token = token.Token
+	p.expiresAt = time.Now().Add(time.Duration(token.ExpiresIn) * time.Second)
+	return p.token, nil
+}
+
+// PrepareCreateOrder checks the client and OAuth before the cashier changes
+// its local channel. OAuth failures cannot have created a provider payment.
+func (p *PayPal) PrepareCreateOrder(orderNos ...string) error {
+	if len(orderNos) > 0 {
+		quote, err := p.payments.EnsurePayPalQuote(orderNos[0], p.rates)
+		if err != nil {
+			return err
+		}
+		if !quote.Available {
+			return httperr.BadRequest(quote.Reason)
+		}
+	}
 	cli, err := p.client()
 	if err != nil {
-		return nil, err
+		return err
 	}
+	_, err = p.accessToken(cli)
+	return err
+}
 
+// send retries an unauthorized request once with a refreshed token. Mutating
+// requests retain the same PayPal-Request-Id across both attempts.
+func (p *PayPal) send(method, path string, body any, requestID string, result any) error {
+	cli, err := p.client()
+	if err != nil {
+		return rejectedChannelCreation(err)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		token, err := p.accessToken(cli)
+		if err != nil {
+			return rejectedChannelCreation(err)
+		}
+		req, err := cli.NewRequest(method, cli.APIBase+path, body)
+		if err != nil {
+			return rejectedChannelCreation(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Prefer", "return=representation")
+		if requestID != "" {
+			req.Header.Set("PayPal-Request-Id", requestID)
+		}
+		err = cli.Send(req, result)
+		var responseError *paypal.ErrorResponse
+		if attempt == 0 && errors.As(err, &responseError) && responseError.Response != nil &&
+			responseError.Response.StatusCode == http.StatusUnauthorized {
+			p.mu.Lock()
+			if p.token == token {
+				p.token = ""
+				p.expiresAt = time.Time{}
+			}
+			p.mu.Unlock()
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("PayPal authentication failed")
+}
+
+// The legacy SDK omits reference_id and capture status from its response
+// structs. Keep those security-relevant fields in our decoding types.
+type paypalOrderResponse struct {
+	ID            string               `json:"id"`
+	Status        string               `json:"status"`
+	Intent        string               `json:"intent"`
+	PurchaseUnits []paypalPurchaseUnit `json:"purchase_units"`
+	Links         []paypal.Link        `json:"links"`
+}
+
+type paypalPurchaseUnit struct {
+	ReferenceID string                     `json:"reference_id"`
+	Amount      *paypal.PurchaseUnitAmount `json:"amount"`
+	Payments    *struct {
+		Captures []paypalCapture `json:"captures"`
+	} `json:"payments"`
+}
+
+type paypalCapture struct {
+	ID     string                     `json:"id"`
+	Status string                     `json:"status"`
+	Amount *paypal.PurchaseUnitAmount `json:"amount"`
+}
+
+func (p *PayPal) CreateOrder(orderNo, baseURL string) (*PayResult, error) {
+	// Repeated calls reuse the persisted provider order and exchange rate.
+	p.orderMu.Lock()
+	defer p.orderMu.Unlock()
 	order, err := p.store.Orders.FindByOrderNo(orderNo, false)
 	if err != nil {
 		return nil, err
 	}
 	if order == nil {
-		return nil, httperr.BadRequest("订单不存在")
+		return nil, httperr.NotFound("订单不存在")
 	}
-
-	rate := p.rates.GetCnyToUsdRate()
-	// order.Amount 是人民币分，按汇率换成美分。兜到 1 分：￥0.01 换算后是
-	// 0.0014 美元，round 归零，PayPal 会以 CANNOT_BE_ZERO_OR_NEGATIVE 拒单。
-	usdCents := int64(math.Max(1, math.Round(money.ToYuan(order.Amount)*rate*100)))
-
-	if err := p.store.Orders.Update(orderNo, map[string]any{
-		"exchangeRate":    rate,
-		"foreignAmount":   usdCents,
-		"foreignCurrency": "USD",
-	}); err != nil {
-		return nil, err
+	if order.PayMethod != "paypal" || order.Status != db.StatusPending || !order.ExpireAt.After(time.Now()) {
+		return nil, httperr.Conflict("订单状态不允许 PayPal 下单")
 	}
-
-	callback := apiurl.URL(baseUrl, "paypal/callback")
-	orderResp, err := cli.CreateOrder("CAPTURE",
-		[]paypal.PurchaseUnitRequest{{
-			Amount: &paypal.PurchaseUnitAmount{
-				Currency: "USD",
-				Value:    money.ToYuanString(usdCents),
-			},
-			Description: order.ProductName,
-			ReferenceID: order.OrderNo,
-		}},
-		nil,
-		&paypal.ApplicationContext{
-			ReturnURL: callback + "?orderNo=" + order.OrderNo,
-			CancelURL: callback + "?orderNo=" + order.OrderNo + "&cancel=1",
-		},
-	)
-	if err == nil {
-		for _, link := range orderResp.Links {
-			if link.Rel == "approve" && link.Href != "" {
-				return &PayResult{Type: "url", Data: link.Href}, nil
+	quote, err := p.payments.EnsurePayPalQuote(orderNo, p.rates)
+	if err != nil {
+		return nil, rejectedChannelCreation(err)
+	}
+	if !quote.Available {
+		return nil, rejectedChannelCreation(httperr.BadRequest(quote.Reason))
+	}
+	order, err = p.store.Orders.FindByOrderNo(orderNo, false)
+	if err != nil {
+		return nil, rejectedChannelCreation(err)
+	}
+	if order == nil || order.PayMethod != "paypal" || order.Status != db.StatusPending || !order.ExpireAt.After(time.Now()) {
+		return nil, httperr.Conflict("订单状态不允许 PayPal 下单")
+	}
+	if _, err := p.client(); err != nil {
+		return nil, rejectedChannelCreation(err)
+	}
+	var response paypalOrderResponse
+	if order.ProviderOrderID != nil && *order.ProviderOrderID != "" {
+		if order.ForeignAmount == nil || order.ForeignCurrency == nil || *order.ForeignCurrency != "USD" {
+			return nil, httperr.Conflict("PayPal 订单缺少已绑定的金额信息")
+		}
+		if err := p.send(http.MethodGet, "/v2/checkout/orders/"+url.PathEscape(*order.ProviderOrderID), nil, "", &response); err != nil {
+			return nil, err
+		}
+		if response.ID != *order.ProviderOrderID || !validPayPalOrder(&response, orderNo, *order.ForeignAmount) {
+			return nil, invalidGatewayResponse("order")
+		}
+	} else {
+		// The displayed quote and retries use the exact same frozen cents/rate.
+		rate, usdCents := *order.ExchangeRate, *order.ForeignAmount
+		callback := apiurl.URL(baseURL, "paypal/callback") + "?orderNo=" + url.QueryEscape(orderNo)
+		body := struct {
+			Intent             string                       `json:"intent"`
+			PurchaseUnits      []paypal.PurchaseUnitRequest `json:"purchase_units"`
+			ApplicationContext *paypal.ApplicationContext   `json:"application_context"`
+		}{
+			Intent: "CAPTURE",
+			PurchaseUnits: []paypal.PurchaseUnitRequest{{
+				Amount:      &paypal.PurchaseUnitAmount{Currency: "USD", Value: money.ToYuanString(usdCents)},
+				Description: order.ProductName, ReferenceID: orderNo,
+			}},
+			ApplicationContext: &paypal.ApplicationContext{ReturnURL: callback, CancelURL: callback + "&cancel=1"},
+		}
+		if err := p.send(http.MethodPost, "/v2/checkout/orders", body, orderNo, &response); err != nil {
+			var responseError *paypal.ErrorResponse
+			if errors.As(err, &responseError) && responseError.Response != nil {
+				switch responseError.Response.StatusCode {
+				case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden,
+					http.StatusNotFound, http.StatusUnprocessableEntity:
+					return nil, rejectedChannelCreation(err)
+				}
 			}
+			return nil, err
 		}
-		err = fmt.Errorf("PayPal 响应缺少确认链接")
+		if !validPayPalOrder(&response, orderNo, usdCents) {
+			return nil, invalidGatewayResponse("order")
+		}
+		if err := p.store.Orders.BindProviderOrder(orderNo, response.ID, rate, usdCents, "USD"); err != nil {
+			return nil, err
+		}
 	}
-
-	p.log.Error(fmt.Sprintf("PayPal order creation failed: %s", err))
-	return nil, httperr.BadRequest("PayPal 下单失败")
+	for _, link := range response.Links {
+		if link.Rel == "approve" && validPayPalApprovalURL(link.Href) {
+			return &PayResult{Type: "url", Data: link.Href}, nil
+		}
+	}
+	return nil, invalidGatewayResponse("approval")
 }
 
-// CaptureOrder 用户在 PayPal 付完回来后 capture 并入账。
-//
-// 业务失败一律落成 {success:false, ...}（同时把订单标失败），
-// 只有落库本身出错才返回 error。
+func validPayPalOrder(order *paypalOrderResponse, orderNo string, cents int64) bool {
+	if order.ID == "" || order.Intent != "CAPTURE" || len(order.PurchaseUnits) != 1 {
+		return false
+	}
+	if order.Status != "CREATED" && order.Status != "APPROVED" && order.Status != "PAYER_ACTION_REQUIRED" {
+		return false
+	}
+	unit := order.PurchaseUnits[0]
+	return unit.ReferenceID == orderNo && validPayPalAmount(unit.Amount, cents)
+}
+
+func validPayPalApprovalURL(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && u.Scheme == "https" && u.User == nil && u.Port() == "" &&
+		(u.Hostname() == "www.sandbox.paypal.com" || u.Hostname() == "sandbox.paypal.com")
+}
+
+// CaptureOrder validates the browser token before contacting PayPal. Invalid
+// callbacks never change the local payment state.
 func (p *PayPal) CaptureOrder(orderNo, token string) (*CaptureResult, error) {
-	cli, err := p.client()
+	unlock := p.payments.LockCashierChannel(orderNo)
+	defer unlock()
+	p.orderMu.Lock()
+	defer p.orderMu.Unlock()
+	order, err := p.store.Orders.FindByOrderNo(orderNo, false)
 	if err != nil {
-		return p.captureFailed(orderNo, err.Error())
-	}
-
-	resp, err := cli.CaptureOrder(token, paypal.CaptureOrderRequest{})
-	if err != nil {
-		return p.captureFailed(orderNo, err.Error())
-	}
-	if resp == nil || resp.Status != "COMPLETED" {
-		if _, err := p.payments.MarkFailed(orderNo, strp("PayPal capture not completed")); err != nil {
-			return nil, err
-		}
-		return &CaptureResult{}, nil
-	}
-
-	// capture 的金额从 purchase_units[0].payments.captures[0] 取 ——
-	// 这是 PayPal 实际扣到的钱，拿它和订单金额比对，挡住金额不符的回调。
-	var captureID, rawValue, rawCurrency string
-	if len(resp.PurchaseUnits) > 0 && resp.PurchaseUnits[0].Payments != nil &&
-		len(resp.PurchaseUnits[0].Payments.Captures) > 0 {
-		capture := resp.PurchaseUnits[0].Payments.Captures[0]
-		captureID = capture.ID
-		if capture.Amount != nil {
-			rawValue = capture.Amount.Value
-			rawCurrency = capture.Amount.Currency
-		}
-	}
-	// PayPal 的 value 是 "10.00" 这种十进制字符串，边界上转成最小单位整数。
-	capturedCents := money.YuanStringToCents(rawValue)
-	capturedCurrency := strings.ToUpper(rawCurrency)
-	if capturedCurrency == "" {
-		capturedCurrency = "USD"
-	}
-
-	if captureID == "" || capturedCents <= 0 {
-		p.log.Error(fmt.Sprintf("PayPal capture missing id/amount for %s", orderNo))
-		if _, err := p.payments.MarkFailed(orderNo, strp("PayPal capture missing fields")); err != nil {
-			return nil, err
-		}
-		return &CaptureResult{}, nil
-	}
-
-	if _, err := p.payments.MarkPaid(orderNo, &captureID, capturedCents, capturedCurrency); err != nil {
-		// 金额不匹配 —— 不标失败（钱是真收到了），标记为需要人工对账。
-		p.log.Error(fmt.Sprintf("PayPal capture amount validation rejected for %s: %s. Capture %s requires manual reconciliation.",
-			orderNo, err, captureID))
-		return &CaptureResult{CaptureID: &captureID, Error: strp("amount_mismatch")}, nil
-	}
-
-	p.log.Log(fmt.Sprintf("PayPal order %s captured: %s (%d %s cents)",
-		orderNo, captureID, capturedCents, capturedCurrency))
-	return &CaptureResult{Success: true, CaptureID: &captureID}, nil
-}
-
-// captureFailed 统一的失败分支：记日志 + 订单标失败 + 回 {success:false, error}。
-func (p *PayPal) captureFailed(orderNo, message string) (*CaptureResult, error) {
-	p.log.Error(fmt.Sprintf("PayPal capture failed for %s: %s", orderNo, message))
-	if _, err := p.payments.MarkFailed(orderNo, &message); err != nil {
 		return nil, err
 	}
+	if order == nil {
+		return nil, httperr.NotFound("订单不存在")
+	}
+	if order.PayMethod != "paypal" || token == "" || order.ProviderOrderID == nil || token != *order.ProviderOrderID {
+		return p.captureFailed(orderNo, "provider_order_mismatch")
+	}
+	if order.Status == db.StatusPaid && order.ThirdPartyTradeNo != nil {
+		return &CaptureResult{Success: true, CaptureID: order.ThirdPartyTradeNo}, nil
+	}
+	if order.Status != db.StatusPending || !order.ExpireAt.After(time.Now()) {
+		return p.captureFailed(orderNo, "order_not_pending")
+	}
+	if order.ForeignAmount == nil || order.ForeignCurrency == nil || *order.ForeignCurrency != "USD" {
+		return p.captureFailed(orderNo, "missing_foreign_amount")
+	}
+	if quote := services.PayPalQuoteForOrder(order); !quote.Available {
+		return p.captureFailed(orderNo, "invalid_paypal_quote")
+	}
+	var response paypalOrderResponse
+	path := "/v2/checkout/orders/" + url.PathEscape(token)
+	err = p.send(http.MethodPost, path+"/capture", paypal.CaptureOrderRequest{}, "capture-"+orderNo, &response)
+	if err != nil && alreadyCaptured(err) {
+		err = p.send(http.MethodGet, path, nil, "", &response)
+	}
+	if err != nil {
+		return p.captureFailed(orderNo, "capture_request_failed")
+	}
+	if response.ID != token || response.Status != "COMPLETED" || len(response.PurchaseUnits) != 1 ||
+		response.PurchaseUnits[0].ReferenceID != orderNo {
+		return p.captureFailed(orderNo, "capture_order_mismatch")
+	}
+	payments := response.PurchaseUnits[0].Payments
+	if payments == nil || len(payments.Captures) != 1 {
+		return p.captureFailed(orderNo, "capture_missing_fields")
+	}
+	capture := payments.Captures[0]
+	if capture.ID == "" || capture.Status != "COMPLETED" {
+		return p.captureFailed(orderNo, "capture_not_completed")
+	}
+	if !validPayPalAmount(capture.Amount, *order.ForeignAmount) {
+		return p.captureFailed(orderNo, "amount_mismatch")
+	}
+	paid, err := p.payments.MarkPaidForChannel("paypal", orderNo, &capture.ID, *order.ForeignAmount, "USD")
+	if err != nil {
+		return nil, err
+	}
+	if paid.Status != db.StatusPaid || paid.ThirdPartyTradeNo == nil || *paid.ThirdPartyTradeNo != capture.ID {
+		return p.captureFailed(orderNo, "order_state_changed")
+	}
+	return &CaptureResult{Success: true, CaptureID: &capture.ID}, nil
+}
+
+func alreadyCaptured(err error) bool {
+	var responseError *paypal.ErrorResponse
+	if !errors.As(err, &responseError) {
+		return false
+	}
+	for _, detail := range responseError.Details {
+		if detail.Issue == "ORDER_ALREADY_CAPTURED" {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *PayPal) captureFailed(orderNo, message string) (*CaptureResult, error) {
+	p.log.Warn(fmt.Sprintf("PayPal capture rejected for %s: %s", orderNo, message))
 	return &CaptureResult{Error: &message}, nil
 }
 
-// Refund 退一笔 PayPal capture。captureID 就是订单上的 thirdPartyTradeNo，
-// refundCents 是 currency 的最小单位整数值。返回上游退款单号，空串 = 失败。
-// 实现 services.PayPalRefunder。
-func (p *PayPal) Refund(captureID string, refundCents int64, currency string, reason string) string {
-	if currency == "" {
-		currency = "USD"
+func validPayPalAmount(amount *paypal.PurchaseUnitAmount, expected int64) bool {
+	if amount == nil || amount.Currency != "USD" || expected <= 0 {
+		return false
+	}
+	cents, ok := paypalAmountCents(amount.Value)
+	return ok && cents == expected
+}
+
+// Parse decimal amounts without rounding malformed or fractional-cent values.
+func paypalAmountCents(value string) (int64, bool) {
+	parts := strings.Split(value, ".")
+	if len(parts) > 2 || parts[0] == "" {
+		return 0, false
+	}
+	for _, part := range parts {
+		if part == "" {
+			return 0, false
+		}
+		for _, c := range part {
+			if c < '0' || c > '9' {
+				return 0, false
+			}
+		}
+	}
+	whole, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || whole > (math.MaxInt64-99)/100 {
+		return 0, false
+	}
+	var fraction int64
+	if len(parts) == 2 {
+		if len(parts[1]) > 2 {
+			return 0, false
+		}
+		fraction, _ = strconv.ParseInt(parts[1], 10, 64)
+		if len(parts[1]) == 1 {
+			fraction *= 10
+		}
+	}
+	return whole*100 + fraction, true
+}
+
+// Refund keeps the legacy completed-refund interface. The service uses the
+// structured method below to distinguish pending/unknown outcomes.
+func (p *PayPal) Refund(captureID string, refundCents int64, currency, reason string) string {
+	id, status, err := p.RefundWithStatus(captureID, refundCents, currency, reason, "")
+	if err != nil || status != "COMPLETED" {
+		return ""
+	}
+	return id
+}
+
+// RefundWithStatus accepts a durable operation ID for retrying an uncertain
+// result without issuing a second refund. PENDING is never reported completed.
+func (p *PayPal) RefundWithStatus(captureID string, refundCents int64, currency, reason, requestID string) (string, string, error) {
+	if captureID == "" || refundCents <= 0 || (currency != "" && currency != "USD") {
+		return "", "FAILED", httperr.BadRequest("PayPal 退款参数无效")
 	}
 	if reason == "" {
 		reason = "Group initiated refund"
 	}
+	body := map[string]any{
+		"amount":        map[string]string{"value": money.ToYuanString(refundCents), "currency_code": "USD"},
+		"note_to_payer": reason,
+	}
+	var result paypal.RefundResponse
+	if err := p.send(http.MethodPost, "/v2/payments/captures/"+url.PathEscape(captureID)+"/refund", body, requestID, &result); err != nil {
+		var responseError *paypal.ErrorResponse
+		if errors.As(err, &responseError) && responseError.Response != nil &&
+			responseError.Response.StatusCode >= 400 && responseError.Response.StatusCode < 500 &&
+			responseError.Response.StatusCode != http.StatusConflict {
+			return "", "FAILED", err
+		}
+		if httperr.As(err) != nil {
+			return "", "FAILED", err
+		}
+		return "", "UNKNOWN", err
+	}
+	if result.Status == "FAILED" || result.Status == "CANCELLED" {
+		return result.ID, "FAILED", nil
+	}
+	if result.ID == "" || !validPayPalAmount(result.Amount, refundCents) {
+		return result.ID, "UNKNOWN", fmt.Errorf("PayPal 退款响应缺少有效单号或金额")
+	}
+	switch result.Status {
+	case "COMPLETED", "PENDING":
+		return result.ID, result.Status, nil
+	default:
+		return result.ID, "UNKNOWN", fmt.Errorf("PayPal 退款状态未知")
+	}
+}
 
-	cli, err := p.client()
-	if err != nil {
-		p.log.Error(fmt.Sprintf("PayPal refund failed for capture %s: %s", captureID, err))
-		return ""
+// QueryRefund reconciles an already accepted refund without issuing another
+// POST. Missing or inconsistent data keeps the existing operation uncertain.
+func (p *PayPal) QueryRefund(refundID string, expectedCents int64, expectedCurrency string) (string, error) {
+	if refundID == "" || expectedCents <= 0 || expectedCurrency != "USD" {
+		return "UNKNOWN", httperr.BadRequest("PayPal 退款查询参数无效")
 	}
-
-	req, err := cli.NewRequest("POST", cli.APIBase+"/v2/payments/captures/"+captureID+"/refund",
-		map[string]any{
-			"amount": map[string]any{
-				"value":         money.ToYuanString(refundCents),
-				"currency_code": currency,
-			},
-			"note_to_payer": reason,
-		})
-	if err != nil {
-		p.log.Error(fmt.Sprintf("PayPal refund failed for capture %s: %s", captureID, err))
-		return ""
+	var result paypal.RefundResponse
+	if err := p.send(http.MethodGet, "/v2/payments/refunds/"+url.PathEscape(refundID), nil, "", &result); err != nil {
+		return "UNKNOWN", err
 	}
-
-	var result map[string]any
-	if err := cli.SendWithAuth(req, &result); err != nil {
-		p.log.Error(fmt.Sprintf("PayPal refund failed for capture %s: %s", captureID, err))
-		return ""
+	if result.ID != refundID || !validPayPalAmount(result.Amount, expectedCents) {
+		return "UNKNOWN", fmt.Errorf("PayPal 退款查询响应与现有退款不匹配")
 	}
-
-	id, _ := result["id"].(string)
-	status, _ := result["status"].(string)
-	if id != "" && (status == "COMPLETED" || status == "PENDING") {
-		p.log.Log(fmt.Sprintf("PayPal refund initiated for capture %s: %s (%s)", captureID, id, status))
-		return id
+	switch result.Status {
+	case "COMPLETED", "PENDING":
+		return result.Status, nil
+	case "FAILED", "CANCELLED":
+		return "FAILED", nil
+	default:
+		return "UNKNOWN", fmt.Errorf("PayPal 退款状态未知")
 	}
-	if raw, err := json.Marshal(result); err == nil {
-		p.log.Warn(fmt.Sprintf("PayPal refund unexpected response: %s", raw))
-	}
-	return ""
 }

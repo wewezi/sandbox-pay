@@ -8,7 +8,7 @@ import (
 
 // FeeResult 一笔订单入账后的三段金额，全是整数分。
 type FeeResult struct {
-	// Fee Sandbox Pay 向接入方收的手续费。
+	// Fee Mintweft 向接入方收的手续费。
 	Fee int64 `json:"fee"`
 	// ChannelCost 上游渠道（支付宝/PayPal）收的成本。
 	ChannelCost int64 `json:"channelCost"`

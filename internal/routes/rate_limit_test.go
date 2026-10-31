@@ -6,9 +6,26 @@
 package routes
 
 import (
+	"fmt"
 	"net/http"
 	"testing"
 )
+
+func TestLoginIgnoresSpoofedForwardingHeaders(t *testing.T) {
+	h := newHarness(t, nil)
+	for i := 0; i < 6; i++ {
+		r := h.do(t, reqSpec{
+			Method: "POST", Path: "/v1/api/auth/login", IP: "10.98.50.1",
+			Body:    map[string]any{"username": testAdmin, "password": "incorrect-password"},
+			Headers: map[string]string{"X-Forwarded-For": fmt.Sprintf("1.2.3.%d", i+1)},
+		})
+		want := http.StatusUnauthorized
+		if i == 5 {
+			want = http.StatusTooManyRequests
+		}
+		eq(t, "status", r.Status, want)
+	}
+}
 
 func TestGlobalRateLimit(t *testing.T) {
 	h := newHarness(t, map[string]string{"THROTTLE_LIMIT": "3"})

@@ -24,13 +24,16 @@ type executor interface {
 // SQLite 是单写者，写事务之间本来就串行，所以不需要（也没有）
 // SELECT ... FOR UPDATE 那种行锁 ——「读出来判状态再写回去」在事务里天然是原子的。
 type Store struct {
-	db *sql.DB
+	db   *sql.DB
+	path string
 
-	Orders   *OrdersRepo
-	ApiKeys  *ApiKeysRepo
-	Groups   *GroupsRepo
-	Notifies *NotifyRepo
-	Users    *UsersRepo
+	Orders    *OrdersRepo
+	ApiKeys   *ApiKeysRepo
+	Groups    *GroupsRepo
+	Notifies  *NotifyRepo
+	Users     *UsersRepo
+	Refunds   *RefundRepo
+	UsageLogs *UsageRepo
 }
 
 // Open 打开（必要时建表）数据库。
@@ -57,7 +60,13 @@ func Open(dbFile, packageRoot string) (*Store, error) {
 		conn.Close()
 		return nil, fmt.Errorf("建表失败: %w", err)
 	}
-	return newStore(conn), nil
+	if err := migrate(conn); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("数据库升级失败: %w", err)
+	}
+	store := newStore(conn)
+	store.path = path
+	return store, nil
 }
 
 func newStore(conn *sql.DB) *Store {
@@ -72,6 +81,8 @@ func (s *Store) bind() {
 	s.Groups = &GroupsRepo{ex: s.db}
 	s.Notifies = &NotifyRepo{ex: s.db}
 	s.Users = &UsersRepo{ex: s.db}
+	s.Refunds = &RefundRepo{ex: s.db}
+	s.UsageLogs = &UsageRepo{ex: s.db}
 }
 
 // resolvePath 解析库文件路径并确保目录存在。
@@ -94,19 +105,20 @@ func (s *Store) Close() error { return s.db.Close() }
 
 // Do 在写事务里跑 fn。任一步出错就回滚，错误原样返回。
 //
-// 回调必须同步做完「读-判状态-写」—— 事务里不能等 goroutine/网络，
-// 发通知这类动作放到 Do 返回之后（和原版「事务外发通知」一致）。
+// 回调同步做完读、状态变更和通知入队；网络投递留在事务外。
 func (s *Store) Do(fn func(tx *TxScope) error) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	scope := &TxScope{
-		Orders:   &OrdersRepo{ex: tx},
-		ApiKeys:  &ApiKeysRepo{ex: tx},
-		Groups:   &GroupsRepo{ex: tx},
-		Notifies: &NotifyRepo{ex: tx},
-		Users:    &UsersRepo{ex: tx},
+		Orders:    &OrdersRepo{ex: tx},
+		ApiKeys:   &ApiKeysRepo{ex: tx},
+		Groups:    &GroupsRepo{ex: tx},
+		Notifies:  &NotifyRepo{ex: tx},
+		Users:     &UsersRepo{ex: tx},
+		Refunds:   &RefundRepo{ex: tx},
+		UsageLogs: &UsageRepo{ex: tx},
 	}
 	if err := fn(scope); err != nil {
 		tx.Rollback()
@@ -117,11 +129,13 @@ func (s *Store) Do(fn func(tx *TxScope) error) error {
 
 // TxScope 事务内的各表 repo，全部绑定到同一个 Tx。
 type TxScope struct {
-	Orders   *OrdersRepo
-	ApiKeys  *ApiKeysRepo
-	Groups   *GroupsRepo
-	Notifies *NotifyRepo
-	Users    *UsersRepo
+	Orders    *OrdersRepo
+	ApiKeys   *ApiKeysRepo
+	Groups    *GroupsRepo
+	Notifies  *NotifyRepo
+	Users     *UsersRepo
+	Refunds   *RefundRepo
+	UsageLogs *UsageRepo
 }
 
 // Runner 跑一个事务的最小接口。service 依赖它，测试里塞直接回调的假实现。

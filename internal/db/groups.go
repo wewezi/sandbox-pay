@@ -9,7 +9,7 @@ type GroupsRepo struct {
 
 // FindFirst 沙箱种子分组：按 id 升序取第一条，给测试下单这种没有 Key 上下文的路径用。
 func (r *GroupsRepo) FindFirst() (*Group, error) {
-	row := r.ex.QueryRow(`SELECT "id", "name", "isActive", "createdAt", "updatedAt"
+	row := r.ex.QueryRow(`SELECT "id", "name", "isActive", "createdAt", "updatedAt", "webhookSecret"
 		FROM "groups" ORDER BY "id" ASC LIMIT 1`)
 	g, err := scanGroup(row)
 	if err == sql.ErrNoRows {
@@ -20,7 +20,7 @@ func (r *GroupsRepo) FindFirst() (*Group, error) {
 
 // FindByID 按 id 查，找不到返回 (nil, nil)。
 func (r *GroupsRepo) FindByID(id int64) (*Group, error) {
-	row := r.ex.QueryRow(`SELECT "id", "name", "isActive", "createdAt", "updatedAt"
+	row := r.ex.QueryRow(`SELECT "id", "name", "isActive", "createdAt", "updatedAt", "webhookSecret"
 		FROM "groups" WHERE "id" = ?`, id)
 	g, err := scanGroup(row)
 	if err == sql.ErrNoRows {
@@ -30,9 +30,11 @@ func (r *GroupsRepo) FindByID(id int64) (*Group, error) {
 }
 
 // List 所有分组，按 id 升序。
-func (r *GroupsRepo) List() ([]*Group, error) {
-	rows, err := r.ex.Query(`SELECT "id", "name", "isActive", "createdAt", "updatedAt"
-		FROM "groups" ORDER BY "id" ASC`)
+func (r *GroupsRepo) List(scopes ...[]int64) ([]*Group, error) {
+	w := &Where{}
+	w.AddProjectScope(`"id"`, firstProjectScope(scopes))
+	rows, err := r.ex.Query(`SELECT "id", "name", "isActive", "createdAt", "updatedAt", "webhookSecret"
+		FROM "groups"`+w.SQL()+` ORDER BY "id" ASC`, w.Args()...)
 	if err != nil {
 		return nil, err
 	}
@@ -50,9 +52,13 @@ func (r *GroupsRepo) List() ([]*Group, error) {
 
 // Insert 新建分组，返回建好的行。
 func (r *GroupsRepo) Insert(name string, isActive bool) (*Group, error) {
+	secret, err := generateWebhookSecret()
+	if err != nil {
+		return nil, err
+	}
 	res, err := r.ex.Exec(
-		`INSERT INTO "groups" ("name", "isActive") VALUES (?, ?)`,
-		name, boolToInt(isActive),
+		`INSERT INTO "groups" ("name", "isActive", "webhookSecret") VALUES (?, ?, ?)`,
+		name, boolToInt(isActive), secret,
 	)
 	if err != nil {
 		return nil, err

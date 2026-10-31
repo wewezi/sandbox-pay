@@ -1,53 +1,149 @@
 package httpx
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"net/http"
+	"net/netip"
+	"net/url"
+	"strconv"
 	"strings"
+
+	"sandbox-pay/internal/config"
 )
 
-// ClientIP 尽力取客户端 IP。优先 X-Forwarded-For（信任的反代后面），
-// 回落到连接的远端地址。
-func ClientIP(r *http.Request) string {
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		if first := strings.TrimSpace(strings.Split(fwd, ",")[0]); first != "" {
-			return first
-		}
-	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
+type proxyInfoKey struct{}
+
+type proxyInfo struct {
+	ip   string
+	base string
 }
 
-// BaseURL 拼当前请求的「协议://host」，给第三方回调地址用。
-//
-// 反代后面要认 X-Forwarded-Proto，否则本机 http 会把 notify_url 写成 http，
-// 而线上其实是 https。
-func BaseURL(r *http.Request) string {
-	host := r.Header.Get("X-Forwarded-Host")
-	if host == "" {
-		host = r.Host
+// ProxyHeaders only trusts headers supplied by an explicitly trusted peer.
+// Invalid configuration and malformed address chains fail closed.
+func ProxyHeaders(cfg config.Config) func(http.Handler) http.Handler {
+	prefixes, _ := config.TrustedProxyCIDRs(cfg)
+	trusted := func(addr netip.Addr) bool {
+		for _, prefix := range prefixes {
+			if prefix.Contains(addr.Unmap()) {
+				return true
+			}
+		}
+		return false
 	}
-	if host == "" {
-		host = "localhost"
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			peer := remoteAddress(r)
+			info := proxyInfo{ip: ClientIP(r), base: BaseURL(r)}
+			if trusted(peer) {
+				if raw := strings.Join(r.Header.Values("X-Forwarded-For"), ","); raw != "" {
+					var chain []netip.Addr
+					valid := true
+					for _, item := range strings.Split(raw, ",") {
+						addr, err := netip.ParseAddr(strings.TrimSpace(item))
+						if err != nil || addr.Zone() != "" || addr.IsUnspecified() || addr.IsMulticast() {
+							valid = false
+							break
+						}
+						chain = append(chain, addr.Unmap())
+					}
+					if valid {
+						client := peer
+						for i := len(chain) - 1; i >= 0 && trusted(client); i-- {
+							client = chain[i]
+						}
+						info.ip = client.String()
+					}
+				}
+				host := requestHost(r.Host)
+				if forwarded := lastHeaderValue(strings.Join(r.Header.Values("X-Forwarded-Host"), ",")); validHost(forwarded) {
+					host = forwarded
+				}
+				proto := requestScheme(r)
+				if forwarded := lastHeaderValue(strings.Join(r.Header.Values("X-Forwarded-Proto"), ",")); forwarded == "http" || forwarded == "https" {
+					proto = forwarded
+				}
+				info.base = proto + "://" + host
+			}
+			ctx := context.WithValue(r.Context(), proxyInfoKey{}, info)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
 	}
+}
 
-	proto := ""
-	if fwd := r.Header.Get("X-Forwarded-Proto"); fwd != "" {
-		proto = strings.TrimSpace(strings.Split(fwd, ",")[0])
+// ClientIP uses the connection address unless ProxyHeaders validated a chain.
+func ClientIP(r *http.Request) string {
+	if info, ok := r.Context().Value(proxyInfoKey{}).(proxyInfo); ok {
+		return info.ip
 	}
-	if proto == "" {
-		// 服务端请求 r.URL.Scheme 通常是空的，回落到 TLS 判定
-		if r.TLS != nil {
-			proto = "https"
-		} else {
-			proto = "http"
+	if addr := remoteAddress(r); addr.IsValid() {
+		return addr.String()
+	}
+	return "unknown"
+}
+
+// BaseURL uses validated forwarding metadata only when ProxyHeaders trusts it.
+func BaseURL(r *http.Request) string {
+	if info, ok := r.Context().Value(proxyInfoKey{}).(proxyInfo); ok {
+		return info.base
+	}
+	return requestScheme(r) + "://" + requestHost(r.Host)
+}
+
+func remoteAddress(r *http.Request) netip.Addr {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	addr, _ := netip.ParseAddr(host)
+	return addr.Unmap()
+}
+
+func requestScheme(r *http.Request) string {
+	if r.TLS != nil {
+		return "https"
+	}
+	return "http"
+}
+
+func lastHeaderValue(raw string) string {
+	items := strings.Split(raw, ",")
+	return strings.TrimSpace(items[len(items)-1])
+}
+
+func requestHost(raw string) string {
+	if validHost(raw) {
+		return raw
+	}
+	return "localhost"
+}
+
+func validHost(raw string) bool {
+	if raw == "" || strings.ContainsAny(raw, "\\/\r\n\t @#?%,") {
+		return false
+	}
+	u, err := url.Parse("//" + raw)
+	if err != nil || u.Host != raw || u.Hostname() == "" || u.User != nil {
+		return false
+	}
+	if port := u.Port(); port != "" {
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return false
+		}
+	} else if strings.HasSuffix(raw, ":") {
+		return false
+	}
+	if addr, err := netip.ParseAddr(u.Hostname()); err == nil {
+		return addr.Zone() == ""
+	}
+	for _, c := range u.Hostname() {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '-') {
+			return false
 		}
 	}
-	return proto + "://" + host
+	return true
 }
 
 // JSONBody 解析 JSON body，非 JSON 或空 body 一律当空对象（校验层再报字段缺失）。

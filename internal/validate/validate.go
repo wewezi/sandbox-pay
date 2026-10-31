@@ -4,7 +4,7 @@
 // 未声明的字段直接报错而不是静默丢掉。
 //
 // 错误信息统一是「字段 + 具体原因」（如 orderNo should not be empty），
-// 前端 public/app.js 的 pickMessage 按这个口径展示，改文案要一起改。
+// 前端 web/app.ts 的 pickMessage 合并错误列表，供页面展示。
 package validate
 
 import (

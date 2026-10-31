@@ -107,8 +107,8 @@ func TestGroupServiceEnsureSeed(t *testing.T) {
 		if !apiKeyPattern.MatchString(key.Key) {
 			t.Errorf("key.key = %q, want sp_sandbox_ + 64 hex chars", key.Key)
 		}
-		if group.Name != "Sandbox Pay Group" {
-			t.Errorf("group.name = %q, want Sandbox Pay Group", group.Name)
+		if group.Name != "Mintweft Default Project" {
+			t.Errorf("group.name = %q, want Mintweft Default Project", group.Name)
 		}
 	})
 
@@ -136,30 +136,23 @@ func TestGroupServiceEnsureSeed(t *testing.T) {
 		}
 	})
 
-	t.Run("分组还在但 Key 全被停用时补一把出来", func(t *testing.T) {
-		// 否则谁都调不通网关，而沙箱页要先登录才进得去
+	t.Run("随机 Key 全被停用时不自动补发", func(t *testing.T) {
 		f := createGroupService(t, map[string]string{})
 		group, first, _ := f.ensureSeed(t)
 		if _, err := f.service.ToggleKey(first.ID); err != nil {
 			t.Fatalf("ToggleKey: %v", err)
 		}
 
-		_, key, _ := f.ensureSeed(t)
-
-		if key.ID == first.ID {
-			t.Errorf("key.id = %d, want a NEW key (first was disabled)", key.ID)
+		_, key, generated := f.ensureSeed(t)
+		if key != nil || generated {
+			t.Errorf("EnsureSeed returned key=%v generated=%v, want nil/false", key, generated)
 		}
-		if !key.IsActive {
-			t.Error("key.isActive = false, want true")
-		}
-		if n := groupKeyCount(t, f.store, group.ID); n != 2 {
-			t.Errorf("key rows = %d, want 2", n)
+		if n := groupKeyCount(t, f.store, group.ID); n != 1 {
+			t.Errorf("key rows = %d, want 1", n)
 		}
 	})
 
-	t.Run(".env 那把 Key 被停用后重新启用，而不是重复 insert", func(t *testing.T) {
-		// key 上有唯一约束，重复 insert 会 500；而 listGroups 每次都走 EnsureSeed，
-		// 一旦 500 沙箱页就彻底打不开，也没法在界面上把它启用回来
+	t.Run(".env Key 的停用经过列表查询默认分组和重启仍保持", func(t *testing.T) {
 		f := createGroupService(t, map[string]string{
 			"GROUP_API_KEY": "sp_from_env",
 		})
@@ -168,19 +161,33 @@ func TestGroupServiceEnsureSeed(t *testing.T) {
 			t.Fatalf("ToggleKey: %v", err)
 		}
 
-		_, key, generated, err := f.service.EnsureSeed()
+		list, err := f.service.ListGroups()
+		if err != nil {
+			t.Fatalf("ListGroups: %v", err)
+		}
+		if len(list) != 1 || len(list[0].Keys) != 1 || list[0].Keys[0].IsActive {
+			t.Fatalf("list changed disabled key: %+v", list)
+		}
+		if _, err := f.service.DefaultGroup(); err != nil {
+			t.Fatalf("DefaultGroup: %v", err)
+		}
+		// 新 service 执行与进程启动相同的 Init，凭证状态只来自数据库。
+		restarted := NewGroupService(f.store, config.Map(map[string]string{
+			"GROUP_API_KEY": "sp_from_env",
+		}))
+		if err := restarted.Init(); err != nil {
+			t.Fatalf("Init: %v", err)
+		}
+		_, key, generated, err := restarted.EnsureSeed()
 		if err != nil {
 			t.Fatalf("EnsureSeed: %v", err)
 		}
-
-		if key.ID != first.ID {
-			t.Errorf("key.id = %d, want the original row %d", key.ID, first.ID)
+		if key != nil || generated {
+			t.Errorf("EnsureSeed returned key=%v generated=%v, want nil/false", key, generated)
 		}
-		if !key.IsActive {
-			t.Error("key.isActive = false, want re-activated")
-		}
-		if generated {
-			t.Error("generated = true, want false (reused the .env key)")
+		stored, err := f.store.ApiKeys.FindByID(first.ID)
+		if err != nil || stored == nil || stored.IsActive {
+			t.Fatalf("disabled key changed: key=%v err=%v", stored, err)
 		}
 		// 复用原来那行，不新增
 		if n := groupKeyCount(t, f.store, group.ID); n != 1 {
@@ -188,7 +195,7 @@ func TestGroupServiceEnsureSeed(t *testing.T) {
 		}
 	})
 
-	t.Run(".env 那把 Key 已被别的分组占用时退回随机生成", func(t *testing.T) {
+	t.Run("已有分组的 Key 被移动后不按 .env 补发或夺回", func(t *testing.T) {
 		f := createGroupService(t, map[string]string{
 			"GROUP_API_KEY": "sp_from_env",
 		})
@@ -210,24 +217,24 @@ func TestGroupServiceEnsureSeed(t *testing.T) {
 
 		_, key, generated := f.ensureSeed(t)
 
-		if key.GroupID != seeded.ID {
-			t.Errorf("key.groupId = %d, want the seeded group %d", key.GroupID, seeded.ID)
+		if key != nil || generated {
+			t.Errorf("EnsureSeed returned key=%v generated=%v, want nil/false", key, generated)
 		}
-		// 没抢走别人那把，也没撞唯一约束
-		if !apiKeyPattern.MatchString(key.Key) {
-			t.Errorf("key.key = %q, want sp_sandbox_ + 64 hex chars (random fallback)", key.Key)
+		if n := groupKeyCount(t, f.store, seeded.ID); n != 0 {
+			t.Errorf("seed key rows = %d, want 0", n)
 		}
-		if !generated {
-			t.Error("generated = false, want true")
+		if n := groupKeyCount(t, f.store, other.ID); n != 1 {
+			t.Errorf("other key rows = %d, want 1", n)
 		}
 	})
 }
 
 func TestGroupServiceListGroups(t *testing.T) {
-	t.Run("带出明文 Key（沙箱后台要给自己抄）", func(t *testing.T) {
+	t.Run("列表只返回令牌标识，不再返回明文", func(t *testing.T) {
 		f := createGroupService(t, map[string]string{
 			"GROUP_API_KEY": "sp_visible",
 		})
+		f.ensureSeed(t)
 
 		list, err := f.service.ListGroups()
 		if err != nil {
@@ -240,20 +247,20 @@ func TestGroupServiceListGroups(t *testing.T) {
 		if len(list[0].Keys) != 1 {
 			t.Fatalf("len(keys) = %d, want 1", len(list[0].Keys))
 		}
-		if list[0].Keys[0].Key != "sp_visible" {
-			t.Errorf("keys[0].key = %q, want sp_visible", list[0].Keys[0].Key)
+		if list[0].Keys[0].Key != "" || list[0].Keys[0].KeyPrefix == "" {
+			t.Error("token list must contain display metadata without plaintext")
 		}
 	})
 
-	t.Run("空库也先种出种子分组，页面不会是空的", func(t *testing.T) {
+	t.Run("空库列表只读不创建分组或凭证", func(t *testing.T) {
 		f := createGroupService(t, map[string]string{})
 
 		list, err := f.service.ListGroups()
 		if err != nil {
 			t.Fatalf("ListGroups: %v", err)
 		}
-		if len(list) != 1 {
-			t.Errorf("len(list) = %d, want 1", len(list))
+		if len(list) != 0 || groupCount(t, f.store) != 0 {
+			t.Errorf("list query created groups: %+v", list)
 		}
 	})
 }
@@ -317,9 +324,13 @@ func TestGroupServiceIssueKey(t *testing.T) {
 		if keys[1].Name != "第二把" {
 			t.Errorf("keys[1].name = %q, want 第二把", keys[1].Name)
 		}
-		// 两把 Key 的值必须不同，否则 UNIQUE 会炸
-		if keys[0].Key == keys[1].Key {
-			t.Error("two keys share the same value, want distinct keys")
+		first, err := f.store.ApiKeys.FindByID(keys[0].ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, err := f.store.ApiKeys.FindByID(keys[1].ID)
+		if err != nil || first.KeyHash == second.KeyHash {
+			t.Fatalf("issued tokens must have distinct stored hashes: %v", err)
 		}
 	})
 

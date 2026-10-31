@@ -1,8 +1,11 @@
 package services
 
 import (
+	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
+	"sync"
 	"time"
 
 	"sandbox-pay/internal/db"
@@ -12,19 +15,20 @@ import (
 	"sandbox-pay/internal/signature"
 )
 
-// NotifyEnqueuer PaymentService 只用到入队这一件事，声明成接口方便塞假的。
+// NotifyEnqueuer 只准备记录；订单状态机负责在事务内入队。
 type NotifyEnqueuer interface {
-	EnqueueNotification(notifyURL string, notification PaymentNotification, signingKey string) error
+	PrepareNotification(notifyURL string, notification PaymentNotification, signingKey string) (db.InsertNotifyInput, error)
 }
 
 // OrderCaller 下单方。
 //
-// GroupID 决定订单归属和数据隔离；APIKeyID 记下用的是哪把 Key，
-// 回调签名认它。后台/公开测试下单没有 Key 上下文，APIKeyID 是空的 ——
-// 那些单也不带 notifyUrl，走不到签名。
+// GroupID decides ownership; APIKeyID records the bearer credential used.
+// Callback signing uses a separate project secret saved on the order.
 type OrderCaller struct {
-	GroupID  int64
-	APIKeyID *int64
+	GroupID        int64
+	APIKeyID       *int64
+	ClientIP       *string
+	ClientLocation *string
 }
 
 // CreateOrderInput 下单入参。Amount 是元，边界上立刻转整数分。
@@ -32,6 +36,7 @@ type CreateOrderInput struct {
 	Amount          float64
 	ProductName     string
 	PayMethod       string
+	ExpireMinutes   *int
 	ExternalOrderNo *string
 	ReturnURL       *string
 	NotifyURL       *string
@@ -61,31 +66,34 @@ type OrderQueryResult struct {
 
 // OrderGroupQueryResult 订单详情（带结算金额，给分组隔离的查单用）。
 type OrderGroupQueryResult struct {
-	OrderNo           string  `json:"orderNo"`
-	ExternalOrderNo   *string `json:"externalOrderNo,omitempty"`
-	Amount            float64 `json:"amount"`
-	RefundedAmount    float64 `json:"refundedAmount"`
-	Fee               float64 `json:"fee"`
-	SettleAmount      float64 `json:"settleAmount"`
-	Status            int     `json:"status"`
-	PayMethod         string  `json:"payMethod"`
-	ProductName       string  `json:"productName"`
-	PayAt             *string `json:"payAt,omitempty"`
-	ThirdPartyTradeNo *string `json:"thirdPartyTradeNo,omitempty"`
-	CreatedAt         string  `json:"createdAt"`
-	ExpireAt          string  `json:"expireAt"`
+	CallbackSignatureVersion int     `json:"callbackSignatureVersion"`
+	OrderNo                  string  `json:"orderNo"`
+	ExternalOrderNo          *string `json:"externalOrderNo,omitempty"`
+	Amount                   float64 `json:"amount"`
+	RefundedAmount           float64 `json:"refundedAmount"`
+	Fee                      float64 `json:"fee"`
+	SettleAmount             float64 `json:"settleAmount"`
+	Status                   int     `json:"status"`
+	PayMethod                string  `json:"payMethod"`
+	ProductName              string  `json:"productName"`
+	PayAt                    *string `json:"payAt,omitempty"`
+	ThirdPartyTradeNo        *string `json:"thirdPartyTradeNo,omitempty"`
+	CreatedAt                string  `json:"createdAt"`
+	ExpireAt                 string  `json:"expireAt"`
 }
 
 // PaymentService 订单状态机：建单、查单、以及三个 mark* 入账原语。
 //
 // 状态判定都在 Store.Do 的写事务里完成 —— SQLite 是单写者，写事务之间
 // 本来就串行，「读-判状态-写」天然原子，不需要行锁。
-// 通知入队这类动作一律放到事务提交之后。
+// 通知记录与订单一起提交，网络投递由 NotifyService 在事务外执行。
 type PaymentService struct {
-	store  *db.Store
-	notify NotifyEnqueuer
-	fees   *FeeCalculator
-	log    *logger.Logger
+	store             *db.Store
+	notify            NotifyEnqueuer
+	fees              *FeeCalculator
+	log               *logger.Logger
+	channelMu         sync.Mutex
+	channelOperations map[string]*cashierChannelOperation
 }
 
 // NewPaymentService 构造。
@@ -103,55 +111,97 @@ func NewPaymentService(store *db.Store, notify NotifyEnqueuer, fees *FeeCalculat
 // 幂等：只按 (groupID, externalOrderNo) 去重。同分组换把 Key 重下
 // 同一个 externalOrderNo 仍然是同一笔，不按 Key 分桶。
 func (s *PaymentService) CreateOrder(caller OrderCaller, dto CreateOrderInput) (*OrderResult, error) {
+	expireMinutes := 30
+	if dto.ExpireMinutes != nil {
+		expireMinutes = *dto.ExpireMinutes
+		if expireMinutes < 1 || expireMinutes > 120 {
+			return nil, httperr.BadRequest("expireMinutes 必须是 1–120 的整数分钟")
+		}
+	}
+	if math.IsNaN(dto.Amount) || math.IsInf(dto.Amount, 0) || dto.Amount < 0.01 || dto.Amount >= float64(math.MaxInt64)/100 {
+		return nil, httperr.BadRequest("amount 必须是有效的正数金额")
+	}
 	// 入参是元，边界上转成整数分。
 	amountCents := money.YuanToCents(dto.Amount)
 
-	if strDeref(dto.ExternalOrderNo, "") != "" {
-		existing, err := s.store.Orders.FindLatestByExternalOrderNo(caller.GroupID, *dto.ExternalOrderNo)
-		if err != nil {
-			return nil, err
-		}
-		if existing != nil {
-			if existing.Amount != amountCents {
-				// 同一个幂等键换了金额：调用方的 bug，不是资源不存在，400 更准确。
-				return nil, httperr.BadRequestf(
-					"externalOrderNo %s already exists with a different amount", *dto.ExternalOrderNo)
+	var order *db.PaymentOrder
+	err := s.store.Do(func(tx *db.TxScope) error {
+		var group *db.Group
+		if caller.APIKeyID != nil || strDeref(dto.NotifyURL, "") != "" {
+			var err error
+			group, err = tx.Groups.FindByID(caller.GroupID)
+			if err != nil {
+				return err
 			}
-			if existing.Status == db.StatusPending && existing.ExpireAt.After(time.Now()) &&
-				existing.PayMethod != dto.PayMethod {
-				if err := s.store.Orders.Update(existing.OrderNo, map[string]any{"payMethod": dto.PayMethod}); err != nil {
-					return nil, err
+			if group == nil || !group.IsActive {
+				return httperr.BadRequest("项目不存在或已停用")
+			}
+		}
+		if caller.APIKeyID != nil {
+			key, err := tx.ApiKeys.FindByID(*caller.APIKeyID)
+			if err != nil {
+				return err
+			}
+			if key == nil || !key.IsActive || key.GroupID != caller.GroupID {
+				return httperr.Unauthorized("令牌不存在、已停用或不属于当前项目")
+			}
+		}
+		if strDeref(dto.ExternalOrderNo, "") != "" {
+			existing, err := tx.Orders.FindLatestByExternalOrderNo(caller.GroupID, *dto.ExternalOrderNo)
+			if err != nil {
+				return err
+			}
+			if existing != nil {
+				if existing.Amount != amountCents {
+					// 同一个幂等键换了金额：调用方的 bug，不是资源不存在，400 更准确。
+					return httperr.BadRequestf(
+						"externalOrderNo %s already exists with a different amount", *dto.ExternalOrderNo)
 				}
+				if existing.PayMethod != dto.PayMethod {
+					return httperr.Conflict("相同 externalOrderNo 不能更换支付渠道")
+				}
+				order = existing
+				return nil
 			}
-			return buildOrderResult(existing), nil
 		}
-	}
 
-	now := time.Now()
-	groupID := caller.GroupID
-	order := &db.PaymentOrder{
-		ID:              randomHex(16),
-		OrderNo:         signature.CreateOrderNo("PAY", 12),
-		Amount:          amountCents,
-		ProductName:     dto.ProductName,
-		PayMethod:       dto.PayMethod,
-		Status:          db.StatusPending,
-		CreatedAt:       now,
-		UpdatedAt:       now,
-		ExpireAt:        now.Add(30 * time.Minute),
-		ExternalOrderNo: dto.ExternalOrderNo,
-		ReturnURL:       dto.ReturnURL,
-		NotifyURL:       dto.NotifyURL,
-		GroupID:         &groupID,
-		APIKeyID:        caller.APIKeyID,
-		// userId: 0 = 未归属（没有终端用户体系）
-		UserID:         0,
-		RefundedAmount: 0,
-		ChannelCost:    0,
-		Fee:            0,
-		SettleAmount:   0,
-	}
-	if err := s.store.Orders.Insert(order); err != nil {
+		now := time.Now()
+		groupID := caller.GroupID
+		order = &db.PaymentOrder{
+			ID:               randomHex(16),
+			OrderNo:          signature.CreateOrderNo("PAY", 12),
+			Amount:           amountCents,
+			ProductName:      dto.ProductName,
+			PayMethod:        dto.PayMethod,
+			Status:           db.StatusPending,
+			CreatedAt:        now,
+			UpdatedAt:        now,
+			ExpireAt:         now.Add(time.Duration(expireMinutes) * time.Minute),
+			ExternalOrderNo:  dto.ExternalOrderNo,
+			ReturnURL:        dto.ReturnURL,
+			NotifyURL:        dto.NotifyURL,
+			GroupID:          &groupID,
+			APIKeyID:         caller.APIKeyID,
+			ClientIP:         caller.ClientIP,
+			ClientLocation:   caller.ClientLocation,
+			SignatureVersion: 2,
+			// userId: 0 = 未归属（没有终端用户体系）
+			UserID:         0,
+			RefundedAmount: 0,
+			ChannelCost:    0,
+			Fee:            0,
+			SettleAmount:   0,
+		}
+		if strDeref(dto.NotifyURL, "") != "" {
+			if group.WebhookSecret == "" {
+				return httperr.BadRequest("项目未配置回调签名密钥")
+			}
+			secret := group.WebhookSecret
+			order.SigningSecret = &secret
+		}
+		return tx.Orders.Insert(order)
+	})
+	if err != nil {
 		return nil, err
 	}
 	return buildOrderResult(order), nil
@@ -181,6 +231,34 @@ func (s *PaymentService) QueryOrder(orderNo string) (*OrderQueryResult, error) {
 	}, nil
 }
 
+// SwitchPaymentMethod changes only a pending order's current selection. A
+// PayPal binding and its amount snapshot survive selection changes for retry.
+func (s *PaymentService) SwitchPaymentMethod(orderNo, method string) error {
+	if method != "alipay" && method != "paypal" && method != "native" {
+		return httperr.BadRequest("无效支付渠道")
+	}
+	return s.store.Do(func(tx *db.TxScope) error {
+		order, err := tx.Orders.FindByOrderNo(orderNo, false)
+		if err != nil {
+			return err
+		}
+		if order == nil {
+			return httperr.NotFound("订单不存在")
+		}
+		if order.Status != db.StatusPending || !order.ExpireAt.After(time.Now()) {
+			return httperr.Conflict("订单状态不允许切换渠道")
+		}
+		if order.PayMethod == method {
+			return nil
+		}
+		if !CashierChannelAllowed(order, method) {
+			_, reason := CashierChannelCapabilities(order)
+			return httperr.Conflict(reason)
+		}
+		return tx.Orders.Update(orderNo, map[string]any{"payMethod": method})
+	})
+}
+
 // QueryByGroup 查单，限定在某个分组内（别的分组查不到这一单）。
 func (s *PaymentService) QueryByGroup(groupID int64, orderNo string) (*OrderGroupQueryResult, error) {
 	order, err := s.store.Orders.FindByOrderNoAndGroup(orderNo, groupID)
@@ -191,28 +269,42 @@ func (s *PaymentService) QueryByGroup(groupID int64, orderNo string) (*OrderGrou
 		return nil, httperr.NotFound("订单不存在")
 	}
 	return &OrderGroupQueryResult{
-		OrderNo:           order.OrderNo,
-		ExternalOrderNo:   order.ExternalOrderNo,
-		Amount:            money.ToYuan(order.Amount),
-		RefundedAmount:    money.ToYuan(order.RefundedAmount),
-		Fee:               money.ToYuan(order.Fee),
-		SettleAmount:      money.ToYuan(order.SettleAmount),
-		Status:            order.Status,
-		PayMethod:         order.PayMethod,
-		ProductName:       order.ProductName,
-		PayAt:             jsTimePtr(order.PayAt),
-		ThirdPartyTradeNo: order.ThirdPartyTradeNo,
-		CreatedAt:         JsTime(order.CreatedAt),
-		ExpireAt:          JsTime(order.ExpireAt),
+		CallbackSignatureVersion: order.SignatureVersion,
+		OrderNo:                  order.OrderNo,
+		ExternalOrderNo:          order.ExternalOrderNo,
+		Amount:                   money.ToYuan(order.Amount),
+		RefundedAmount:           money.ToYuan(order.RefundedAmount),
+		Fee:                      money.ToYuan(order.Fee),
+		SettleAmount:             money.ToYuan(order.SettleAmount),
+		Status:                   order.Status,
+		PayMethod:                order.PayMethod,
+		ProductName:              order.ProductName,
+		PayAt:                    jsTimePtr(order.PayAt),
+		ThirdPartyTradeNo:        order.ThirdPartyTradeNo,
+		CreatedAt:                JsTime(order.CreatedAt),
+		ExpireAt:                 JsTime(order.ExpireAt),
 	}, nil
 }
 
 // MarkPaid 网关确认收款后入账。
 //
 // 调用方必须传上游真实回报的金额和币种：拿它和订单原值比对，
-// 挡掉伪造/篡改金额的回调。已支付的订单重复调用会再次入队通知 ——
-// 原版就是这个 quirk，接入方自己按 orderNo 去重。
+// 挡掉伪造/篡改金额的回调。重复回调不改状态，也不重复入队。
 func (s *PaymentService) MarkPaid(orderNo string, thirdPartyTradeNo *string, paidAmountCents int64, paidCurrency string) (*db.PaymentOrder, error) {
+	return s.markPaid(orderNo, thirdPartyTradeNo, paidAmountCents, paidCurrency, "")
+}
+
+// MarkPaidForChannel records the first verified payment's actual source in
+// the same transaction as settlement and fee calculation. The payer may have
+// changed the pending selection after an earlier provider link was issued.
+func (s *PaymentService) MarkPaidForChannel(channel, orderNo string, thirdPartyTradeNo *string, paidAmountCents int64, paidCurrency string) (*db.PaymentOrder, error) {
+	if channel != "native" && channel != "alipay" && channel != "paypal" {
+		return nil, httperr.BadRequest("无效支付来源渠道")
+	}
+	return s.markPaid(orderNo, thirdPartyTradeNo, paidAmountCents, paidCurrency, channel)
+}
+
+func (s *PaymentService) markPaid(orderNo string, thirdPartyTradeNo *string, paidAmountCents int64, paidCurrency, sourceChannel string) (*db.PaymentOrder, error) {
 	if paidCurrency == "" {
 		paidCurrency = "CNY"
 	}
@@ -251,10 +343,14 @@ func (s *PaymentService) MarkPaid(orderNo string, thirdPartyTradeNo *string, pai
 			return httperr.Conflict(fmt.Sprintf("订单 %s 金额不匹配，拒绝入账", orderNo))
 		}
 
+		if sourceChannel != "" {
+			current.PayMethod = sourceChannel
+		}
 		fees := s.fees.Calculate(current.PayMethod, current.Amount)
 		payAt := time.Now()
 		patch := map[string]any{
-			"fee": fees.Fee, "channelCost": fees.ChannelCost, "settleAmount": fees.SettleAmount,
+			"payMethod": current.PayMethod,
+			"fee":       fees.Fee, "channelCost": fees.ChannelCost, "settleAmount": fees.SettleAmount,
 			"status": db.StatusPaid, "payAt": payAt, "thirdPartyTradeNo": thirdPartyTradeNo,
 		}
 		if err := tx.Orders.Update(orderNo, patch); err != nil {
@@ -270,33 +366,52 @@ func (s *PaymentService) MarkPaid(orderNo string, thirdPartyTradeNo *string, pai
 		s.log.Log(fmt.Sprintf("Order %s marked as paid (%d %s cents); fee=%d cost=%d settle=%d",
 			orderNo, paidAmountCents, paidCurrency, fees.Fee, fees.ChannelCost, fees.SettleAmount))
 		order = current
-		return nil
+		return s.enqueueStateNotification(tx, current, "paid", current.ThirdPartyTradeNo)
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	// 事务提交后再入队（前端状态走轮询，不推 WebSocket）。
-	// 判 status==Paid 是为了挡住上面的「重复调用跳过」分支之外的路径 ——
-	// 但原版只看 status，所以已支付的重复回调确实会再入队一次，照抄。
-	if order.Status == db.StatusPaid && order.NotifyURL != nil && *order.NotifyURL != "" && order.APIKey != nil {
-		payAt := time.Now()
-		if order.PayAt != nil {
-			payAt = *order.PayAt
-		}
-		if err := s.notify.EnqueueNotification(*order.NotifyURL, PaymentNotification{
-			OrderNo:           order.OrderNo,
-			ExternalOrderNo:   order.ExternalOrderNo,
-			Status:            "paid",
-			Amount:            money.ToYuan(order.Amount),
-			PayMethod:         order.PayMethod,
-			PayAt:             JsTime(payAt),
-			ThirdPartyTradeNo: thirdPartyTradeNo,
-		}, order.APIKey.Key); err != nil {
-			return nil, err
-		}
-	}
 	return order, nil
+}
+
+func (s *PaymentService) enqueueStateNotification(tx *db.TxScope, order *db.PaymentOrder, status string, tradeNo *string) error {
+	if order.NotifyURL == nil || *order.NotifyURL == "" {
+		return nil
+	}
+	if order.SigningSecret == nil || *order.SigningSecret == "" {
+		if order.SignatureVersion >= 2 {
+			return fmt.Errorf("order callback signing secret is missing")
+		}
+		return nil
+	}
+	payAt := time.Now()
+	if order.PayAt != nil {
+		payAt = *order.PayAt
+	}
+	in, err := s.notify.PrepareNotification(*order.NotifyURL, PaymentNotification{
+		OrderNo: order.OrderNo, ExternalOrderNo: order.ExternalOrderNo, Status: status,
+		Amount: money.ToYuan(order.Amount), PayMethod: order.PayMethod, PayAt: JsTime(payAt), ThirdPartyTradeNo: tradeNo,
+	}, *order.SigningSecret)
+	if err != nil {
+		return err
+	}
+	if order.SignatureVersion >= 2 {
+		var meta map[string]any
+		if err := json.Unmarshal([]byte(in.Signature), &meta); err != nil {
+			return err
+		}
+		if meta == nil {
+			return fmt.Errorf("invalid callback signature metadata")
+		}
+		meta["version"] = order.SignatureVersion
+		encoded, err := json.Marshal(meta)
+		if err != nil {
+			return err
+		}
+		in.Signature = string(encoded)
+	}
+	return tx.Notifies.Insert(in)
 }
 
 // MarkRefunded 全额或部分退款落地。调用方必须已经在上游执行完退款并拿到 refundTradeNo。
@@ -304,6 +419,13 @@ func (s *PaymentService) MarkPaid(orderNo string, thirdPartyTradeNo *string, pai
 // 按 (orderNo, refundTradeNo) 幂等 —— 同一个 tradeNo 重放是 no-op。
 // groupIDForCheck 非 nil 时做分组隔离，不匹配一律报「订单不存在」，不泄漏他人订单。
 func (s *PaymentService) MarkRefunded(orderNo string, refundedCents int64, refundTradeNo string, groupIDForCheck *int64) (*db.PaymentOrder, error) {
+	return s.completeRefund(orderNo, refundedCents, refundTradeNo, groupIDForCheck, "")
+}
+
+func (s *PaymentService) completeRefund(orderNo string, refundedCents int64, refundTradeNo string, groupIDForCheck *int64, requestID string) (*db.PaymentOrder, error) {
+	if refundedCents <= 0 || refundTradeNo == "" {
+		return nil, httperr.BadRequest("退款金额和上游退款单号必须有效")
+	}
 	var order *db.PaymentOrder
 	err := s.store.Do(func(tx *db.TxScope) error {
 		current, err := tx.Orders.FindByOrderNo(orderNo, true)
@@ -316,8 +438,15 @@ func (s *PaymentService) MarkRefunded(orderNo string, refundedCents int64, refun
 		if groupIDForCheck != nil && (current.GroupID == nil || *current.GroupID != *groupIDForCheck) {
 			return httperr.NotFound("订单不存在")
 		}
-		// 幂等：同一个退款 tradeNo 重放，已经退完了就直接返回。
-		if current.RefundTradeNo != nil && *current.RefundTradeNo == refundTradeNo && current.Status == db.StatusRefunded {
+		previous, err := tx.Refunds.FindByTradeNo(orderNo, refundTradeNo)
+		if err != nil {
+			return err
+		}
+		if requestID != "" && previous != nil && previous.ID != requestID {
+			return httperr.Conflict("上游退款单号已属于另一退款请求，需要人工核对")
+		}
+		// 兼容升级前仅在订单上保存的最后一笔退款。
+		if (previous != nil && previous.Status == db.RefundCompleted) || (requestID == "" && current.RefundTradeNo != nil && *current.RefundTradeNo == refundTradeNo) {
 			order = current
 			return nil
 		}
@@ -325,11 +454,11 @@ func (s *PaymentService) MarkRefunded(orderNo string, refundedCents int64, refun
 			return httperr.Conflict(fmt.Sprintf("订单状态不允许退款: %d", current.Status))
 		}
 		newRefunded := current.RefundedAmount + refundedCents
-		if newRefunded-current.Amount > 1 {
+		if refundedCents > current.Amount-current.RefundedAmount {
 			return httperr.BadRequest("退款累计金额超过订单金额")
 		}
 		status := db.StatusPaid
-		if abs64(newRefunded-current.Amount) <= 1 {
+		if newRefunded == current.Amount {
 			status = db.StatusRefunded
 		} else {
 			// 部分退款落地：Refunding 只表示「退款在途」，退成了就得回到 Paid，
@@ -349,39 +478,36 @@ func (s *PaymentService) MarkRefunded(orderNo string, refundedCents int64, refun
 		current.RefundTradeNo = &refundTradeNo
 		current.RefundAt = &refundAt
 		current.Status = status
+		if requestID == "" {
+			if err := tx.Refunds.Insert(&db.RefundOperation{ID: "RF_" + randomHex(16), OrderNo: orderNo, Amount: refundedCents, TradeNo: &refundTradeNo, Status: db.RefundCompleted}); err != nil {
+				return err
+			}
+		} else {
+			op, err := tx.Refunds.FindByID(requestID)
+			if err != nil {
+				return err
+			}
+			if op == nil || op.OrderNo != orderNo || op.Amount != refundedCents || op.Status == db.RefundCompleted || op.Status == db.RefundFailed {
+				return httperr.Conflict("退款请求状态与完成记录不匹配")
+			}
+			if err := tx.Refunds.Update(requestID, db.RefundCompleted, &refundTradeNo); err != nil {
+				return err
+			}
+		}
 
 		s.log.Log(fmt.Sprintf("Order %s refund applied: %d cents (total refunded %d, status %d)",
 			orderNo, refundedCents, newRefunded, current.Status))
 		order = current
-		return nil
+		notifyStatus := "partial_refunded"
+		if status == db.StatusRefunded {
+			notifyStatus = "refunded"
+		}
+		return s.enqueueStateNotification(tx, current, notifyStatus, &refundTradeNo)
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	// 事务提交后再入队。原版这里只判 notifyUrl && apiKey（没有 status 判断），
-	// 幂等重放也会再入队一次，照抄。
-	if order.NotifyURL != nil && *order.NotifyURL != "" && order.APIKey != nil {
-		status := "partial_refunded"
-		if order.Status == db.StatusRefunded {
-			status = "refunded"
-		}
-		payAt := time.Now()
-		if order.PayAt != nil {
-			payAt = *order.PayAt
-		}
-		if err := s.notify.EnqueueNotification(*order.NotifyURL, PaymentNotification{
-			OrderNo:           order.OrderNo,
-			ExternalOrderNo:   order.ExternalOrderNo,
-			Status:            status,
-			Amount:            money.ToYuan(order.Amount),
-			PayMethod:         order.PayMethod,
-			PayAt:             JsTime(payAt),
-			ThirdPartyTradeNo: &refundTradeNo,
-		}, order.APIKey.Key); err != nil {
-			return nil, err
-		}
-	}
 	return order, nil
 }
 
@@ -395,6 +521,9 @@ func (s *PaymentService) MarkRefunding(orderNo string) (*db.PaymentOrder, error)
 		}
 		if current == nil {
 			return httperr.NotFound("订单不存在")
+		}
+		if current.Status != db.StatusPaid {
+			return httperr.Conflict("订单已有在途退款或不处于已支付状态")
 		}
 		if current.Status == db.StatusPaid {
 			if err := tx.Orders.Update(orderNo, map[string]any{"status": db.StatusRefunding}); err != nil {

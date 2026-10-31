@@ -6,7 +6,7 @@ node_modules/
 .env.*
 !.env.example
 
-# Build output（前端没有构建步骤，这些只是留着兜底）
+# Build output
 dist/
 build/
 .next/
@@ -47,6 +47,8 @@ Thumbs.db
 
 # Testing
 coverage/
+/output/
+.playwright-cli/
 
 # SQLite database files
 /data/

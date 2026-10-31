@@ -13,7 +13,9 @@ import (
 // Defaults 与原 TS 版 CONFIG_DEFAULTS 一一对应。
 var Defaults = map[string]string{
 	// 沙箱
-	"ENABLE_SANDBOX": "true",
+	"ENABLE_SANDBOX":               "true",
+	"DEMO_DATA_MODE":               "false",
+	"NOTIFY_ALLOW_PRIVATE_NETWORK": "false",
 
 	// 限流
 	"THROTTLE_TTL_MS": "60000",
@@ -42,7 +44,7 @@ var Defaults = map[string]string{
 
 	// 官方存管（自有渠道）
 	"NATIVE_PAY_QR_URL":       "",
-	"NATIVE_PAY_ACCOUNT_NAME": "Sandbox Pay Official",
+	"NATIVE_PAY_ACCOUNT_NAME": "Mintweft Official",
 	"NATIVE_PAY_ACCOUNT_NO":   "",
 	"NATIVE_PAY_BANK_NAME":    "",
 }

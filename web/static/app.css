@@ -1,0 +1,104 @@
+@import './scrollbars.css';
+
+/* Document theme tokens and base typography. Component styles live in web/styles/*.ts. */
+
+:root {
+
+  color-scheme: light dark;
+
+
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 20px;
+  --s6: 24px;
+  --s8: 32px;
+  --s10: 40px;
+  --s12: 48px;
+
+
+  --r-sm: 4px;
+  --r: 6px;
+  --r-lg: 10px;
+  --r-xl: 14px;
+  --r-full: 999px;
+
+
+
+
+  --bg: light-dark(#f4f5f7, #0e0f12);
+  --panel: light-dark(#fff, #17191e);
+  --panel-2: light-dark(#f7f8fa, #1e2026);
+  --line: light-dark(#e6e8ec, #2a2d35);
+  --line-soft: light-dark(#f0f1f4, #22252c);
+  --text: light-dark(#16181d, #eceef2);
+  --muted: light-dark(#6b7280, #9aa0ab);
+  --muted-2: light-dark(#a1a6b0, #6b707a);
+  --scrollbar-thumb: light-dark(#c1c6d0, #454b57);
+  --scrollbar-thumb-hover: light-dark(#9ca4b2, #616a7b);
+  --scrollbar-thumb-active: light-dark(#788391, #8290a5);
+
+  --muted-on-soft: light-dark(#5c6370, #9aa0ab);
+
+
+  --brand: light-dark(#059a4c, #34d17a);
+  --brand-dark: light-dark(#048443, #5adf96);
+  --brand-soft: light-dark(#e7f7ee, #13261b);
+
+  --on-brand: #fff;
+
+  --ok: light-dark(#059a4c, #34d17a);
+  --ok-bg: light-dark(#e7f7ee, #13261b);
+  --warn: light-dark(#d97706, #f5b042);
+  --warn-bg: light-dark(#fff6e8, #2c2112);
+  --err: light-dark(#e11d2e, #ff6673);
+  --err-bg: light-dark(#ffecee, #2e1418);
+  --info-bg: light-dark(#e7f7ee, #13261b);
+
+
+  --shadow-lg:
+    0 18px 48px -12px light-dark(rgba(16, 20, 28, 0.18), rgba(0, 0, 0, 0.62)),
+    0 4px 14px -4px light-dark(rgba(16, 20, 28, 0.08), rgba(0, 0, 0, 0.42));
+  --ring: 0 0 0 3px light-dark(rgba(5, 154, 76, 0.22), rgba(52, 209, 122, 0.32));
+
+  --sidebar-w: 232px;
+
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+
+[hidden] {
+  display: none !important;
+}
+
+body {
+  margin: 0;
+
+  font: 400 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC",
+    "PingFang SC", "Microsoft YaHei", Roboto, sans-serif;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+:root { --date-icon-filter: none; }
+:root[data-theme="dark"] { --date-icon-filter: invert(1) opacity(0.6); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) { --date-icon-filter: invert(1) opacity(0.6); }
+}

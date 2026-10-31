@@ -1,20 +1,17 @@
-// Package routes 路由与中间件装配。
-//
-// 对应原版 src/app.ts + src/routes/*.routes.ts：把 Container 里的服务
-// 挂到 net/http 的 ServeMux 上，中间件链在下面几处叠：
-//
-//	最外层  correlation → security headers → CORS
-//	业务层  全局限流（/v1/api/*）→ 路由级限流/守卫 → handler
-//
-// handler 统一是 func(w, r) error，返回 error 即由 httpx.H 转成统一错误信封。
+// Package routes 使用 chi 装配路由、权限分组和 HTTP 中间件。
 package routes
 
 import (
+	"context"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 
 	"sandbox-pay/internal/apiurl"
 	"sandbox-pay/internal/config"
@@ -29,70 +26,93 @@ import (
 type App struct {
 	cfg config.Config
 	c   *Container
-	mux *http.ServeMux
 	log *logger.Logger
-	// 全局限流挂在这里，每条 /v1/api 路由都在最外层套一次
-	// （同一个 name 计数，行为等价于「给整个前缀挂一个」）。
-	globalLimit httpx.Middleware
 }
 
-// New 组装应用。
-//
-// 静态资源是 mux 的兜底（"/"），API 路由都比它更具体，会先被匹配到；
-// 静态资源找不到文件时走统一信封 404，和原版 Hono 的 notFound 一致。
+// New 组装应用。网关、后台和登录接口的中间件按路由分组声明。
 func New(cfg config.Config, c *Container, static http.Handler) http.Handler {
 	a := &App{
 		cfg: cfg,
 		c:   c,
-		mux: http.NewServeMux(),
 		log: logger.New("App"),
-		globalLimit: httpx.RateLimit(
-			"global",
-			int(config.Number(cfg, "THROTTLE_LIMIT")),
-			time.Duration(config.Number(cfg, "THROTTLE_TTL_MS"))*time.Millisecond,
-		),
 	}
+	r := chi.NewRouter()
+	r.Use(httpx.ProxyHeaders(cfg), httpx.Correlation, httpx.SecurityHeaders, httpx.CORS, middleware.GetHead)
+	r.NotFound(static.ServeHTTP)
+	r.MethodNotAllowed(methodNotAllowed(r))
 
-	a.registerAuth()
-	a.registerAdmin()
-	a.registerGateway()
-	a.registerNativePay()
-	a.registerAlipay()
-	a.registerPayPal()
+	globalLimit := httpx.RateLimit(
+		"global", int(config.Number(cfg, "THROTTLE_LIMIT")),
+		time.Duration(config.Number(cfg, "THROTTLE_TTL_MS"))*time.Millisecond,
+	)
+	r.Route(apiurl.Prefix, func(r chi.Router) {
+		r.NotFound(httpx.WriteNotFound)
+		// 支付宝通知独立验签，不与页面及接入方请求共享限流配额。
+		a.registerAlipay(r)
+		r.Route("/gateway", func(r chi.Router) {
+			r.Use(a.captureGatewayUsage(), globalLimit)
+			a.registerGateway(r.With(httpx.RequireAPIKey(c.Store.ApiKeys)))
+		})
+		r.Group(func(r chi.Router) {
+			r.Use(globalLimit)
+			a.registerAuth(r)
+			a.registerAdmin(r)
+			a.registerNativePay(r)
+			a.registerPayPal(r)
+			a.registerDeveloper(r)
+		})
+	})
 
-	// 探针，不走版本前缀 —— 探活不该被限流，也不该被业务鉴权挡住。
-	a.mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+	// 探活直接检查数据库，不消耗业务请求的限流配额。
+	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if err := a.c.Store.Ping(ctx); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, `{"status":"unavailable"}`+"\n")
+			return
+		}
 		_, _ = io.WriteString(w, `{"status":"ok"}`+"\n")
 	})
 
-	// 兜底：找不到的路径先当静态资源找，找不到再回 404 信封。
-	a.mux.Handle("/", static)
-
-	return httpx.Chain(a.mux, httpx.Correlation, httpx.SecurityHeaders, httpx.CORS)
+	return r
 }
 
-// api 挂一条 /v1/api 路由：先套全局限流，再套调用方给的中间件。
-//
-// 顺序和原版一致 —— 全局限流在最外层，路由级限流/守卫在它里面，
-// 这样被限流挡住的请求根本不会走到守卫。
-func (a *App) api(pattern string, h httpx.Handler, mws ...httpx.Middleware) {
-	all := make([]httpx.Middleware, 0, len(mws)+1)
-	all = append(all, a.globalLimit)
-	all = append(all, mws...)
-	a.mux.Handle(pattern, httpx.Chain(httpx.H(h), all...))
+// methodNotAllowed 保持统一错误响应，并声明该地址支持的方法。
+func methodNotAllowed(router chi.Router) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		if r.URL.RawPath != "" {
+			path = r.URL.RawPath
+		}
+		var allowed []string
+		for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodConnect, http.MethodOptions, http.MethodTrace} {
+			matched := router.Match(chi.NewRouteContext(), method, path)
+			if method == http.MethodHead && !matched {
+				matched = router.Match(chi.NewRouteContext(), http.MethodGet, path)
+			}
+			if matched {
+				allowed = append(allowed, method)
+			}
+		}
+		w.Header().Set("Allow", strings.Join(allowed, ", "))
+		httpx.WriteMethodNotAllowed(w, r)
+	}
 }
 
-// plain 挂一条不套全局限流的 /v1/api 路由。
-//
-// 支付宝的 notify 可能在一秒内打好几次，和页面请求共用一个
-// 60/分钟的桶会把回调误伤掉 —— 它自己有自己的验签兜底，不需要这层。
-func (a *App) plain(pattern string, h httpx.Handler, mws ...httpx.Middleware) {
-	a.mux.Handle(pattern, httpx.Chain(httpx.H(h), mws...))
+// pathParam 读取 chi 参数，仅在路由匹配使用 RawPath 时解码一次。
+func pathParam(r *http.Request, name string) string {
+	value := chi.URLParam(r, name)
+	if r.URL.RawPath != "" {
+		decoded, err := url.PathUnescape(value)
+		if err != nil {
+			return ""
+		}
+		return decoded
+	}
+	return value
 }
-
-// apiPrefix 业务路由统一前缀。
-func apiPrefix(suffix string) string { return apiurl.Prefix + suffix }
 
 // callerOf 把守卫塞进 context 的「这次请求属于谁」取出来。
 //
@@ -140,8 +160,7 @@ func clientIP(r *http.Request) *string {
 	return &ip
 }
 
-// optInt64 数字型 query 参数：空值/解析不出来给 nil，别让 Number(”) 变成 0。
-// 对应原版 `value ? Number(value) : undefined`。
+// optInt64 读取整数查询参数，空值或非法值表示未指定过滤条件。
 func optInt64(r *http.Request, key string) *int64 {
 	raw := strings.TrimSpace(r.URL.Query().Get(key))
 	if raw == "" {
@@ -167,7 +186,7 @@ func optStr(r *http.Request, key string) *string {
 // pathInt64 取路径参数里的整数 id。解析不出来给 -1 —— 永远匹配不到行，
 // 让 service 抛它自己的「记录不存在」，文案才对得上每个接口。
 func pathInt64(r *http.Request, name string) int64 {
-	v, err := strconv.ParseInt(r.PathValue(name), 10, 64)
+	v, err := strconv.ParseInt(pathParam(r, name), 10, 64)
 	if err != nil {
 		return -1
 	}

@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -41,15 +42,22 @@ func ParseExpiresIn(value string) int {
 	if i == 0 {
 		return 86400
 	}
-	n := 0
-	for _, c := range raw[:i] {
-		n = n*10 + int(c-'0')
+	n, err := strconv.Atoi(raw[:i])
+	if err != nil || n <= 0 {
+		return 86400
 	}
-	factor := map[byte]int{'s': 1, 'm': 60, 'h': 3600, 'd': 86400}[raw[i]]
-	if i == len(raw) {
-		factor = 1 // 没有单位后缀，当秒
-	} else if factor == 0 {
-		return 86400 // 后缀认不出来
+	factor := 1
+	if i < len(raw) {
+		if i+1 != len(raw) {
+			return 86400
+		}
+		factor = map[byte]int{'s': 1, 'm': 60, 'h': 3600, 'd': 86400}[raw[i]]
+		if factor == 0 {
+			return 86400
+		}
+	}
+	if n > int(^uint(0)>>1)/factor {
+		return 86400
 	}
 	return n * factor
 }
@@ -105,10 +113,13 @@ func Verify(token, secret string) map[string]any {
 		return nil
 	}
 
-	if exp, ok := payload["exp"].(json.Number); ok {
-		if secs, err := exp.Int64(); err == nil && secs*1000 <= time.Now().UnixMilli() {
-			return nil
-		}
+	exp, ok := payload["exp"].(json.Number)
+	if !ok {
+		return nil
+	}
+	secs, err := exp.Int64()
+	if err != nil || secs <= time.Now().Unix() {
+		return nil
 	}
 	return payload
 }

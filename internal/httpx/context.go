@@ -1,6 +1,4 @@
 // Package httpx HTTP 中间件层：请求上下文、统一信封、错误处理、守卫、限流、安全头。
-//
-// 对应原版 src/http/ 下那几个文件，Hono 的 Context 变量改成了 context.Context。
 package httpx
 
 import (
@@ -18,6 +16,7 @@ const (
 	keyUser
 	keyGroup
 	keyKey
+	keyUsage
 )
 
 // JwtUser JWT 里取出来的用户信息，/auth/session 直接回给前端。

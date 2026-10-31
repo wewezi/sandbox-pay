@@ -5,13 +5,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+
 	"sandbox-pay/internal/config"
+	"sandbox-pay/internal/db"
 	"sandbox-pay/internal/httpx"
+	"sandbox-pay/internal/services"
 	"sandbox-pay/internal/validate"
 )
 
-// 校验 schema。形状照原版 src/routes/*.routes.ts 的 *_SCHEMA，
-// 未声明的字段会被 validate 直接报错（不是静默丢掉）。
+// 请求校验规则。未声明的字段由 validate 拒绝。
 var (
 	loginSchema = validate.Schema{
 		"username": validate.Str(3, 20),
@@ -44,39 +47,61 @@ var (
 
 	switchChannelSchema = validate.Schema{
 		"orderNo": validate.Str(0, 0),
-		"channel": validate.StrIn("alipay", "paypal"),
+		"channel": validate.StrIn("alipay", "paypal", "native"),
 	}
 
 	testPaySchema = validate.Schema{
-		"amount":      validate.Num(0.01, 0),
-		"productName": validate.OptStr(0, 200),
+		"amount":          validate.Num(0.01, 0),
+		"productName":     validate.OptStr(0, 200),
+		"payMethod":       validate.OptStrIn("native", "alipay", "paypal"),
+		"expireMinutes":   validate.OptNum(1, 120),
+		"externalOrderNo": validate.OptStr(0, 200),
+		"returnUrl":       validate.OptURLRule(),
+		"notifyUrl":       validate.OptURLRule(),
+		"apiKeyId":        validate.OptNum(1, 9007199254740991),
 	}
 
 	refundSchema = validate.Schema{
-		"orderNo": validate.Str(0, 0),
-		"amount":  validate.Num(0.01, 0),
-		"reason":  validate.OptStr(0, 255),
+		"orderNo":   validate.Str(0, 0),
+		"amount":    validate.Num(0.01, 0),
+		"reason":    validate.OptStr(0, 255),
+		"requestId": validate.OptStr(1, 64),
 	}
 )
 
-// registerAuth /v1/api/auth。登录挂 5 次/分钟，挡暴力破解。
-func (a *App) registerAuth() {
-	a.api("POST "+apiPrefix("/auth/login"),
-		a.login(),
-		httpx.RateLimit("login", 5, time.Minute))
-
-	a.api("GET "+apiPrefix("/auth/session"),
-		func(w http.ResponseWriter, r *http.Request) error {
-			httpx.OK(w, httpx.User(r.Context()))
+// registerAuth 登录和会话管理；登录独立限制为每分钟 5 次。
+func (a *App) registerAuth(r chi.Router) {
+	r.Route("/auth", func(r chi.Router) {
+		r.With(httpx.RateLimit("login", 5, time.Minute)).Post("/login", httpx.H(a.login()))
+		r.Post("/logout", httpx.H(func(w http.ResponseWriter, r *http.Request) error {
+			if err := a.c.Auth.RevokeToken(httpx.RequestToken(r)); err != nil {
+				return err
+			}
+			http.SetCookie(w, sessionCookie(a.cfg, "", 0))
+			httpx.OK(w, map[string]any{"message": "Logged out"})
 			return nil
-		},
-		httpx.RequireAuth(a.cfg))
-
-	a.api("POST "+apiPrefix("/auth/logout"), func(w http.ResponseWriter, r *http.Request) error {
-		// 属性必须和登录时写一致（见 cookieAttrs），否则 clear 不掉。
-		http.SetCookie(w, sessionCookie(a.cfg, "", 0))
-		httpx.OK(w, map[string]any{"message": "Logged out"})
-		return nil
+		}))
+		r.Group(func(r chi.Router) {
+			r.Use(a.authMiddleware())
+			r.Get("/session", httpx.H(func(w http.ResponseWriter, r *http.Request) error {
+				user := httpx.User(r.Context())
+				defaultAllowed := user.Role == db.RoleSuperAdmin
+				if !defaultAllowed {
+					ids, err := a.allowedProjectIDs(r)
+					if err != nil {
+						return err
+					}
+					group, err := a.c.Store.Groups.FindFirst()
+					if err != nil {
+						return err
+					}
+					defaultAllowed = group != nil && memberProject(ids, group.ID)
+				}
+				httpx.OK(w, map[string]any{"userId": user.UserID, "username": user.Username, "role": user.Role, "sandboxDefaultProjectAllowed": defaultAllowed})
+				return nil
+			}))
+			a.registerSessions(r)
+		})
 	})
 }
 
@@ -94,7 +119,7 @@ func (a *App) login() httpx.Handler {
 		if err != nil {
 			return err
 		}
-		result, err := a.c.Auth.IssueLocalToken(user)
+		result, err := a.c.Auth.IssueLocalToken(user, services.SessionMetadata{ClientIP: httpx.ClientIP(r), UserAgent: r.UserAgent()})
 		if err != nil {
 			return err
 		}
@@ -113,7 +138,7 @@ func (a *App) login() httpx.Handler {
 //
 // maxAge <= 0 表示「删除」。这里必须折成 -1：Go 的 net/http 只在 MaxAge<0 时
 // 才写 "Max-Age=0"，传 0 的话整个 Max-Age 属性都不会输出 —— 结果是个空值的
-// session cookie 留在浏览器里，而不是被删掉。原版 cookieAttrs(0) 推的正是 Max-Age=0。
+// session cookie 留在浏览器里，而不是被删掉。
 func sessionCookie(cfg config.Config, value string, maxAge int) *http.Cookie {
 	if maxAge <= 0 {
 		maxAge = -1

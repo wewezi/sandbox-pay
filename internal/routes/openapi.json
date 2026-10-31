@@ -1,0 +1,5528 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Mintweft API",
+    "version": "1.0.0",
+    "description": "Mintweft，用于开发联调的支付沙箱。所有金额单位元；gateway使用API令牌，admin/auth使用可撤销JWT；回调HMAC-SHA256使用项目独立密钥。前端仅使用无后缀单页路由：/cashier?orderNo=... 为收银台，/sandbox 为测试下单，/developer 为接入中心。API 路径仍使用 /v1/api 前缀，未知 API 不返回应用 HTML。"
+  },
+  "servers": [
+    {
+      "url": "/v1/api"
+    }
+  ],
+  "paths": {
+    "/gateway/pay": {
+      "post": {
+        "summary": "下单与幂等恢复",
+        "tags": [
+          "支付网关"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/PayReceipt"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PayInput"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/gateway/query": {
+      "get": {
+        "summary": "按订单号或外部单号查询",
+        "tags": [
+          "支付网关"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "orderNo",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "orderNo与externalOrderNo必须且仅能指定一项，查询限定在API令牌所属项目"
+          },
+          {
+            "name": "externalOrderNo",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "orderNo与externalOrderNo必须且仅能指定一项，查询限定在API令牌所属项目"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/OrderQuery"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        }
+      }
+    },
+    "/gateway/refund": {
+      "post": {
+        "summary": "部分退款及状态确认",
+        "tags": [
+          "支付网关"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/RefundReceipt"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefundInput"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/login": {
+      "post": {
+        "summary": "登录创建可撤销会话",
+        "tags": [
+          "账号会话"
+        ],
+        "security": [],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "token": {
+                          "type": "string"
+                        },
+                        "tokenType": {
+                          "type": "string",
+                          "example": "Bearer"
+                        },
+                        "username": {
+                          "type": "string"
+                        },
+                        "role": {
+                          "type": "string"
+                        },
+                        "expiresInSeconds": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": []
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Login"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/session": {
+      "get": {
+        "summary": "当前账号和角色",
+        "tags": [
+          "账号会话"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "userId": {
+                          "type": "integer"
+                        },
+                        "username": {
+                          "type": "string"
+                        },
+                        "role": {
+                          "type": "string"
+                        },
+                        "sandboxDefaultProjectAllowed": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": []
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        }
+      }
+    },
+    "/auth/logout": {
+      "post": {
+        "summary": "退出并撤销当前会话",
+        "tags": [
+          "账号会话"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/sessions": {
+      "get": {
+        "summary": "查看登录设备",
+        "tags": [
+          "账号会话"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Session"
+                      }
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        }
+      }
+    },
+    "/auth/sessions/revoke-others": {
+      "post": {
+        "summary": "退出其他设备",
+        "tags": [
+          "账号会话"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/sessions/{id}/revoke": {
+      "post": {
+        "summary": "撤销指定设备会话",
+        "tags": [
+          "账号会话"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/password": {
+      "post": {
+        "summary": "修改密码并撤销原会话",
+        "tags": [
+          "账号会话"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Password"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/dashboard": {
+      "get": {
+        "summary": "项目范围内的数据看板",
+        "tags": [
+          "管理后台"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "utcOffset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        }
+      }
+    },
+    "/admin/stats": {
+      "get": {
+        "summary": "订单统计",
+        "tags": [
+          "管理后台"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "groupId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        }
+      }
+    },
+    "/admin/transactions": {
+      "get": {
+        "summary": "订单列表",
+        "tags": [
+          "管理后台"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "groupId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "payMethod",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "keyword",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "dateFrom",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "dateTo",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "utcOffset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        }
+      }
+    },
+    "/admin/transactions/{orderNo}": {
+      "get": {
+        "summary": "订单、退款及通知详情",
+        "tags": [
+          "管理后台"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "orderNo",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        }
+      },
+      "delete": {
+        "summary": "删除允许删除的订单",
+        "tags": [
+          "管理后台"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "orderNo",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        }
+      }
+    },
+    "/admin/refund": {
+      "post": {
+        "summary": "后台退款",
+        "tags": [
+          "管理后台"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/RefundReceipt"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefundInput"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/test-pay": {
+      "post": {
+        "summary": "创建本地测试订单",
+        "description": "需要管理员会话且沙箱已启用。仅保存本地订单和初始支付方式，返回收银台链接；本请求不会创建支付宝或 PayPal 上游交易。可在收银台付款前切换支付方式。expireMinutes 仅此测试下单接口支持，公共 gateway 下单接口不接受该字段。同项目内 externalOrderNo 用于幂等：金额和当前支付方式相同则复用原订单，保留原商品、地址、令牌、创建时间及截止时间；金额不同返回 400，支付方式不同返回 409。回执始终反映实际保存的参数与当前状态，已支付、失败或过期等订单仍可查看收银台记录。",
+        "tags": [
+          "沙箱场景"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/TestReceipt"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestPay"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/reset-data": {
+      "post": {
+        "summary": "重置订单数据（超级管理员）",
+        "tags": [
+          "沙箱场景"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/sandbox/scenarios": {
+      "get": {
+        "summary": "持久化测试任务列表",
+        "tags": [
+          "沙箱场景"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "orderNo",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/SandboxTask"
+                      }
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        }
+      },
+      "post": {
+        "summary": "创建支付或退款测试场景",
+        "tags": [
+          "沙箱场景"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/SandboxTask"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScenarioInput"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/sandbox/scenarios/{id}/cancel": {
+      "post": {
+        "summary": "取消尚未执行的任务",
+        "tags": [
+          "沙箱场景"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/SandboxTask"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/groups": {
+      "get": {
+        "summary": "可访问项目和令牌",
+        "tags": [
+          "项目令牌"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        }
+      },
+      "post": {
+        "summary": "创建项目并签发首把令牌",
+        "tags": [
+          "项目令牌"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Project"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/projects": {
+      "post": {
+        "summary": "创建项目",
+        "tags": [
+          "项目令牌"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Project"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/groups/{id}/toggle": {
+      "post": {
+        "summary": "启停项目",
+        "tags": [
+          "项目令牌"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/groups/{id}/keys": {
+      "post": {
+        "summary": "签发项目令牌",
+        "tags": [
+          "项目令牌"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Token"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/groups/{id}/webhook-secret": {
+      "get": {
+        "summary": "查看回调密钥并记录审计",
+        "tags": [
+          "项目令牌"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        }
+      }
+    },
+    "/admin/api-keys": {
+      "get": {
+        "summary": "令牌列表（无完整密钥）",
+        "tags": [
+          "项目令牌"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "groupId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        }
+      },
+      "post": {
+        "summary": "签发令牌，完整密钥仅显示一次",
+        "tags": [
+          "项目令牌"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Token"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/api-keys/{id}/toggle": {
+      "post": {
+        "summary": "启停令牌",
+        "tags": [
+          "项目令牌"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/usage-logs": {
+      "get": {
+        "summary": "调用日志与完整筛选集统计",
+        "tags": [
+          "使用日志"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "groupId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "apiKeyId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "method",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "keyword",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "dateFrom",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "dateTo",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "utcOffset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        }
+      }
+    },
+    "/admin/usage-logs/{id}": {
+      "get": {
+        "summary": "调用日志详情",
+        "tags": [
+          "使用日志"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        }
+      }
+    },
+    "/admin/notifications": {
+      "get": {
+        "summary": "回调列表",
+        "tags": [
+          "回调诊断"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "orderNo",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        }
+      }
+    },
+    "/admin/notifications/{id}/detail": {
+      "get": {
+        "summary": "逐次投递历史及回调报文",
+        "tags": [
+          "回调诊断"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/CallbackDetail"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        }
+      }
+    },
+    "/admin/notifications/{id}/replay": {
+      "post": {
+        "summary": "重发回调并保留历史",
+        "tags": [
+          "回调诊断"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/notifications/{id}/simulate": {
+      "post": {
+        "summary": "模拟重复或延迟回调",
+        "tags": [
+          "回调诊断"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "integer"
+                        },
+                        "sourceNotificationId": {
+                          "type": "integer"
+                        },
+                        "mode": {
+                          "type": "string",
+                          "enum": [
+                            "duplicate",
+                            "delayed"
+                          ]
+                        },
+                        "availableAt": {
+                          "type": "string"
+                        },
+                        "orderNo": {
+                          "type": "string"
+                        }
+                      },
+                      "required": []
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CallbackSimulation"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/team/users": {
+      "get": {
+        "summary": "账号和项目成员（超级管理员）",
+        "tags": [
+          "团队管理"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/TeamUser"
+                      }
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        }
+      },
+      "post": {
+        "summary": "创建账号",
+        "tags": [
+          "团队管理"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/TeamUser"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/User"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/team/users/{id}": {
+      "patch": {
+        "summary": "角色调整和账号启停",
+        "tags": [
+          "团队管理"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserPatch"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/team/users/{id}/password": {
+      "post": {
+        "summary": "重置密码并撤销会话",
+        "tags": [
+          "团队管理"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "password": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 72
+                  }
+                },
+                "required": [
+                  "password"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/team/users/{id}/projects": {
+      "put": {
+        "summary": "更新账号项目成员范围",
+        "tags": [
+          "团队管理"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Members"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/operations/status": {
+      "get": {
+        "summary": "数据库、队列及任务状态（超级管理员）",
+        "tags": [
+          "运行维护"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/OperationsStatus"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        }
+      }
+    },
+    "/admin/operations/settings": {
+      "post": {
+        "summary": "配置日志留存与自动备份",
+        "tags": [
+          "运行维护"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/OperationSettings"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OperationSettings"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/operations/cleanup": {
+      "post": {
+        "summary": "按保留策略清理日志",
+        "tags": [
+          "运行维护"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/operations/channels/check": {
+      "post": {
+        "summary": "检查已配置渠道的网络连通性",
+        "tags": [
+          "运行维护"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Channel"
+                      }
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/operations/backups": {
+      "get": {
+        "summary": "备份列表",
+        "tags": [
+          "运行维护"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Backup"
+                      }
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        }
+      },
+      "post": {
+        "summary": "创建SQLite一致备份",
+        "tags": [
+          "运行维护"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Backup"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/operations/backups/{name}": {
+      "get": {
+        "summary": "下载数据库备份",
+        "tags": [
+          "运行维护"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "文件下载",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        }
+      }
+    },
+    "/admin/operations/exports/orders.csv": {
+      "get": {
+        "summary": "导出订单CSV",
+        "tags": [
+          "运行维护"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "groupId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "payMethod",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "keyword",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "dateFrom",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "dateTo",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "utcOffset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "文件下载",
+            "content": {
+              "text/csv": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        }
+      }
+    },
+    "/admin/operations/exports/usage.csv": {
+      "get": {
+        "summary": "导出调用日志CSV",
+        "tags": [
+          "运行维护"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "groupId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "apiKeyId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "method",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "keyword",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "dateFrom",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "dateTo",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "utcOffset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "文件下载",
+            "content": {
+              "text/csv": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        }
+      }
+    },
+    "/admin/audit-logs": {
+      "get": {
+        "summary": "管理操作审计（超级管理员）",
+        "tags": [
+          "运行维护"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "keyword",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        }
+      }
+    },
+    "/native-pay/cashier": {
+      "get": {
+        "summary": "公开收银台状态",
+        "tags": [
+          "收银台"
+        ],
+        "security": [],
+        "parameters": [
+          {
+            "name": "orderNo",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        }
+      }
+    },
+    "/native-pay/public-test-pay": {
+      "post": {
+        "summary": "公开演示下单（仅沙箱）",
+        "tags": [
+          "收银台"
+        ],
+        "security": [],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/native-pay/confirm": {
+      "post": {
+        "summary": "管理员确认收款",
+        "tags": [
+          "收银台"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Confirm"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/native-pay/sandbox-confirm": {
+      "post": {
+        "summary": "买家模拟付款（仅沙箱）",
+        "tags": [
+          "收银台"
+        ],
+        "security": [],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SandboxConfirm"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/native-pay/switch-channel": {
+      "post": {
+        "summary": "切换第三方沙箱渠道",
+        "tags": [
+          "收银台"
+        ],
+        "security": [],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SwitchChannel"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/paypal/callback": {
+      "get": {
+        "summary": "PayPal返回并确认capture",
+        "tags": [
+          "渠道回调"
+        ],
+        "security": [],
+        "parameters": [
+          {
+            "name": "orderNo",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "token",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "PayerID",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        }
+      }
+    },
+    "/alipay/notify": {
+      "post": {
+        "summary": "支付宝签名异步通知",
+        "tags": [
+          "渠道回调"
+        ],
+        "security": [],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "success/failure纯文本",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "success",
+                    "failure"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/gateway/native/pay": {
+      "post": {
+        "summary": "native下单",
+        "tags": [
+          "支付网关"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/PayReceipt"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/nativePay"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/gateway/alipay/pay": {
+      "post": {
+        "summary": "alipay下单",
+        "tags": [
+          "支付网关"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/PayReceipt"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/alipayPay"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/gateway/paypal/pay": {
+      "post": {
+        "summary": "paypal下单",
+        "tags": [
+          "支付网关"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "example": 200
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/PayReceipt"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求参数不正确"
+          },
+          "401": {
+            "description": "未鉴权、凭证失效或会话已撤销"
+          },
+          "403": {
+            "description": "权限不足或沙箱关闭"
+          },
+          "404": {
+            "description": "不存在或不属于当前项目"
+          },
+          "409": {
+            "description": "状态冲突"
+          },
+          "429": {
+            "description": "限流"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/paypalPay"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "gateway为API令牌；admin/auth为管理员JWT"
+      }
+    },
+    "schemas": {
+      "PayInput": {
+        "type": "object",
+        "properties": {
+          "amount": {
+            "type": "number",
+            "minimum": 0.01,
+            "example": 1
+          },
+          "productName": {
+            "type": "string",
+            "maxLength": 200,
+            "example": "联调订单"
+          },
+          "payMethod": {
+            "type": "string",
+            "enum": [
+              "native",
+              "alipay",
+              "paypal"
+            ],
+            "example": "native"
+          },
+          "externalOrderNo": {
+            "type": "string",
+            "description": "同项目内下单幂等键",
+            "example": "demo_order_001"
+          },
+          "notifyUrl": {
+            "type": "string",
+            "format": "uri"
+          },
+          "returnUrl": {
+            "type": "string",
+            "format": "uri"
+          }
+        },
+        "required": [
+          "amount",
+          "productName",
+          "payMethod"
+        ],
+        "additionalProperties": false
+      },
+      "PayReceipt": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "example": "url"
+          },
+          "data": {
+            "type": "string",
+            "description": "旧接口兼容的支付链接；native 为 /cashier?orderNo=...，第三方渠道为其支付地址"
+          },
+          "orderNo": {
+            "type": "string"
+          },
+          "paymentUrl": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer",
+            "description": "-1已过期/0待支付/1已支付/2失败/3退款处理中/4已全额退款",
+            "enum": [
+              -1,
+              0,
+              1,
+              2,
+              3,
+              4
+            ]
+          },
+          "amount": {
+            "type": "number"
+          },
+          "expireAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "type",
+          "data",
+          "orderNo",
+          "paymentUrl",
+          "status",
+          "amount",
+          "expireAt"
+        ],
+        "additionalProperties": false
+      },
+      "RefundInput": {
+        "type": "object",
+        "properties": {
+          "orderNo": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "number",
+            "minimum": 0.01,
+            "example": 0.5
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 255
+          },
+          "requestId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,64}$",
+            "example": "refund_demo_001",
+            "description": "重复退款必须复用原ID"
+          }
+        },
+        "required": [
+          "orderNo",
+          "amount"
+        ],
+        "additionalProperties": false
+      },
+      "RefundReceipt": {
+        "type": "object",
+        "properties": {
+          "orderNo": {
+            "type": "string"
+          },
+          "refundedAmount": {
+            "type": "number"
+          },
+          "refundTradeNo": {
+            "type": "string"
+          },
+          "requestId": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "completed",
+              "pending"
+            ]
+          },
+          "currency": {
+            "type": "string",
+            "example": "CNY"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "ScenarioInput": {
+        "type": "object",
+        "properties": {
+          "orderNo": {
+            "type": "string",
+            "description": "只允许本地native订单"
+          },
+          "scenario": {
+            "type": "string",
+            "enum": [
+              "paid",
+              "failed",
+              "expired",
+              "delayed_paid",
+              "refund_failed",
+              "refund_pending"
+            ]
+          },
+          "delaySeconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3600,
+            "example": 30,
+            "description": "0或省略时延迟支付/退款默认30秒，其他场景忽略该字段"
+          },
+          "amount": {
+            "type": "number",
+            "minimum": 0.01,
+            "description": "仅退款场景，省略时为全部剩余可退金额（元）"
+          }
+        },
+        "required": [
+          "orderNo",
+          "scenario"
+        ],
+        "additionalProperties": false
+      },
+      "CallbackSimulation": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "duplicate",
+              "delayed"
+            ]
+          },
+          "delaySeconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3600,
+            "example": 30
+          }
+        },
+        "required": [
+          "mode"
+        ],
+        "additionalProperties": false
+      },
+      "OperationSettings": {
+        "type": "object",
+        "properties": {
+          "usageRetentionDays": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3650,
+            "example": 90
+          },
+          "auditRetentionDays": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3650,
+            "example": 180
+          },
+          "attemptRetentionDays": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3650,
+            "example": 90
+          },
+          "backupIntervalHours": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 720,
+            "example": 24,
+            "description": "0关闭自动备份"
+          },
+          "backupKeepCount": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "example": 7
+          }
+        },
+        "required": [
+          "usageRetentionDays",
+          "auditRetentionDays",
+          "attemptRetentionDays",
+          "backupIntervalHours",
+          "backupKeepCount"
+        ],
+        "additionalProperties": false
+      },
+      "Login": {
+        "type": "object",
+        "properties": {
+          "username": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 20
+          },
+          "password": {
+            "type": "string",
+            "minLength": 6,
+            "maxLength": 72
+          }
+        },
+        "required": [
+          "username",
+          "password"
+        ],
+        "additionalProperties": false
+      },
+      "Password": {
+        "type": "object",
+        "properties": {
+          "currentPassword": {
+            "type": "string"
+          },
+          "newPassword": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 72
+          }
+        },
+        "required": [
+          "currentPassword",
+          "newPassword"
+        ],
+        "additionalProperties": false
+      },
+      "User": {
+        "type": "object",
+        "properties": {
+          "username": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 72
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "Admin",
+              "SuperAdmin"
+            ]
+          }
+        },
+        "required": [
+          "username",
+          "password"
+        ],
+        "additionalProperties": false
+      },
+      "UserPatch": {
+        "type": "object",
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": [
+              "Admin",
+              "SuperAdmin"
+            ]
+          },
+          "isActive": {
+            "type": "boolean"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "Members": {
+        "type": "object",
+        "properties": {
+          "groupIds": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "required": [
+          "groupIds"
+        ],
+        "additionalProperties": false
+      },
+      "Token": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "groupId": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "Project": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 100
+          },
+          "keyName": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "TestPay": {
+        "type": "object",
+        "description": "订单以 CNY 计价。系统订单号、来源 IP、创建时间和支付截止时间由服务端生成，所属项目由所选令牌确定，不接受这些派生字段。",
+        "properties": {
+          "amount": {
+            "type": "number",
+            "minimum": 0.01,
+            "description": "人民币金额，单位元；必须是有限正数且小于 int64 最大值除以 100，保存时四舍五入为整数分。沙箱页面按两位小数填写。",
+            "example": 1
+          },
+          "productName": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 200,
+            "x-max-utf8-bytes": 200,
+            "default": "Mintweft Test Order",
+            "description": "最多 200 UTF-8 字节；去除首尾空白，省略、null、空字符串或纯空白时使用默认名称。沙箱页面要求填写。"
+          },
+          "payMethod": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "native",
+              "alipay",
+              "paypal",
+              null
+            ],
+            "default": "native",
+            "description": "初始支付方式；native 为 Mintweft 模拟支付，省略或 null 时为 native。不会在下单时直接完成付款或创建上游交易。"
+          },
+          "expireMinutes": {
+            "type": "integer",
+            "nullable": true,
+            "minimum": 1,
+            "maximum": 120,
+            "default": 30,
+            "description": "订单有效期，单位分钟；省略或 null 时为 30。仅 admin/test-pay 支持，公共 gateway 下单接口不接受。幂等重试保留原截止时间。"
+          },
+          "externalOrderNo": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 200,
+            "x-max-utf8-bytes": 200,
+            "description": "同项目内的商户订单幂等键，最多 200 UTF-8 字节；去除首尾空白，空值不设置幂等键。同项目换令牌仍复用同一订单，不按令牌去重。"
+          },
+          "apiKeyId": {
+            "type": "integer",
+            "nullable": true,
+            "minimum": 1,
+            "maximum": 9007199254740991,
+            "description": "有效项目令牌 ID，用于选择所属项目和记录接入来源；令牌及项目必须启用且管理员有该项目权限。省略或 null 时使用默认项目，仍检查项目权限。回调使用项目独立密钥签名。"
+          },
+          "notifyUrl": {
+            "type": "string",
+            "nullable": true,
+            "format": "uri",
+            "pattern": "^https?://",
+            "description": "完整 HTTP/HTTPS 异步通知地址；支付和退款后发送签名回调。省略或 null 时不配置通知，空字符串无效。配置回调时所属项目必须启用。"
+          },
+          "returnUrl": {
+            "type": "string",
+            "nullable": true,
+            "format": "uri",
+            "pattern": "^https?://",
+            "description": "完整 HTTP/HTTPS 支付返回地址；省略或 null 时不配置返回地址，空字符串无效。"
+          }
+        },
+        "required": [
+          "amount"
+        ],
+        "additionalProperties": false
+      },
+      "Confirm": {
+        "type": "object",
+        "properties": {
+          "orderNo": {
+            "type": "string"
+          },
+          "tradeNo": {
+            "type": "string"
+          },
+          "walletUser": {
+            "type": "string"
+          },
+          "walletPass": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "orderNo",
+          "walletUser",
+          "walletPass"
+        ],
+        "additionalProperties": false
+      },
+      "SandboxConfirm": {
+        "type": "object",
+        "properties": {
+          "orderNo": {
+            "type": "string"
+          },
+          "walletUser": {
+            "type": "string"
+          },
+          "walletPass": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "orderNo"
+        ],
+        "additionalProperties": false
+      },
+      "SwitchChannel": {
+        "type": "object",
+        "properties": {
+          "orderNo": {
+            "type": "string"
+          },
+          "channel": {
+            "type": "string",
+            "enum": [
+              "alipay",
+              "paypal"
+            ]
+          }
+        },
+        "required": [
+          "orderNo",
+          "channel"
+        ],
+        "additionalProperties": false
+      },
+      "nativePay": {
+        "type": "object",
+        "properties": {
+          "amount": {
+            "type": "number",
+            "minimum": 0.01,
+            "example": 1
+          },
+          "productName": {
+            "type": "string",
+            "maxLength": 200,
+            "example": "联调订单"
+          },
+          "externalOrderNo": {
+            "type": "string",
+            "description": "同项目内下单幂等键",
+            "example": "demo_order_001"
+          },
+          "notifyUrl": {
+            "type": "string",
+            "format": "uri"
+          },
+          "returnUrl": {
+            "type": "string",
+            "format": "uri"
+          }
+        },
+        "required": [
+          "amount",
+          "productName"
+        ],
+        "additionalProperties": false
+      },
+      "alipayPay": {
+        "type": "object",
+        "properties": {
+          "amount": {
+            "type": "number",
+            "minimum": 0.01,
+            "example": 1
+          },
+          "productName": {
+            "type": "string",
+            "maxLength": 200,
+            "example": "联调订单"
+          },
+          "externalOrderNo": {
+            "type": "string",
+            "description": "同项目内下单幂等键",
+            "example": "demo_order_001"
+          },
+          "notifyUrl": {
+            "type": "string",
+            "format": "uri"
+          },
+          "returnUrl": {
+            "type": "string",
+            "format": "uri"
+          }
+        },
+        "required": [
+          "amount",
+          "productName"
+        ],
+        "additionalProperties": false
+      },
+      "paypalPay": {
+        "type": "object",
+        "properties": {
+          "amount": {
+            "type": "number",
+            "minimum": 0.01,
+            "example": 1
+          },
+          "productName": {
+            "type": "string",
+            "maxLength": 200,
+            "example": "联调订单"
+          },
+          "externalOrderNo": {
+            "type": "string",
+            "description": "同项目内下单幂等键",
+            "example": "demo_order_001"
+          },
+          "notifyUrl": {
+            "type": "string",
+            "format": "uri"
+          },
+          "returnUrl": {
+            "type": "string",
+            "format": "uri"
+          }
+        },
+        "required": [
+          "amount",
+          "productName"
+        ],
+        "additionalProperties": false
+      },
+      "SandboxTask": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "orderNo": {
+            "type": "string"
+          },
+          "scenario": {
+            "type": "string",
+            "enum": [
+              "paid",
+              "failed",
+              "expired",
+              "delayed_paid",
+              "refund_failed",
+              "refund_pending"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "running",
+              "completed",
+              "failed",
+              "cancelled"
+            ]
+          },
+          "amount": {
+            "type": "number",
+            "description": "任务模型中的金额以分计，场景请求金额以元计"
+          },
+          "runAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "lastError": {
+            "type": "string"
+          }
+        },
+        "required": []
+      },
+      "OrderQuery": {
+        "type": "object",
+        "properties": {
+          "orderNo": {
+            "type": "string"
+          },
+          "externalOrderNo": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "number"
+          },
+          "refundedAmount": {
+            "type": "number"
+          },
+          "fee": {
+            "type": "number"
+          },
+          "settleAmount": {
+            "type": "number"
+          },
+          "status": {
+            "type": "integer",
+            "description": "-1已过期/0待支付/1已支付/2失败/3退款处理中/4已全额退款",
+            "enum": [
+              -1,
+              0,
+              1,
+              2,
+              3,
+              4
+            ]
+          },
+          "payMethod": {
+            "type": "string"
+          },
+          "productName": {
+            "type": "string"
+          },
+          "payAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "thirdPartyTradeNo": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expireAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "callbackSignatureVersion": {
+            "type": "integer",
+            "enum": [
+              1,
+              2
+            ]
+          }
+        },
+        "required": []
+      },
+      "TestReceipt": {
+        "type": "object",
+        "description": "实际保存的订单参数和当前状态。幂等重试返回原订单信息，不以本次请求的商品、地址、令牌或有效期覆盖原值。data 和 paymentUrl 均为本地 /cashier?orderNo=... 收银台链接。",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "url"
+            ],
+            "example": "url"
+          },
+          "data": {
+            "type": "string",
+            "format": "uri",
+            "description": "兼容字段，与 paymentUrl 相同的本地 /cashier?orderNo=... 收银台链接"
+          },
+          "orderNo": {
+            "type": "string"
+          },
+          "paymentUrl": {
+            "type": "string",
+            "format": "uri",
+            "description": "打开 /cashier?orderNo=... 中待支付订单的收银台，或查看已结束订单的收银台记录"
+          },
+          "status": {
+            "type": "integer",
+            "description": "-1已过期/0待支付/1已支付/2失败/3退款处理中/4已全额退款",
+            "enum": [
+              -1,
+              0,
+              1,
+              2,
+              3,
+              4
+            ]
+          },
+          "amount": {
+            "type": "number",
+            "description": "实际保存的订单人民币金额，单位元"
+          },
+          "expireAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "productName": {
+            "type": "string"
+          },
+          "payMethod": {
+            "type": "string",
+            "enum": [
+              "native",
+              "alipay",
+              "paypal"
+            ],
+            "description": "订单当前保存的支付方式，可能已在收银台切换"
+          },
+          "externalOrderNo": {
+            "type": "string"
+          },
+          "apiKeyId": {
+            "type": "integer"
+          },
+          "apiKeyName": {
+            "type": "string"
+          },
+          "groupName": {
+            "type": "string"
+          },
+          "notifyUrl": {
+            "type": "string",
+            "format": "uri"
+          },
+          "returnUrl": {
+            "type": "string",
+            "format": "uri"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "type",
+          "data",
+          "paymentUrl",
+          "status",
+          "orderNo",
+          "amount",
+          "expireAt",
+          "createdAt",
+          "productName",
+          "payMethod"
+        ]
+      },
+      "CallbackAttempt": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "attemptNo": {
+            "type": "integer"
+          },
+          "httpStatus": {
+            "type": "integer"
+          },
+          "responseSummary": {
+            "type": "string"
+          },
+          "durationMs": {
+            "type": "number"
+          },
+          "errorMessage": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": []
+      },
+      "CallbackDetail": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "orderNo": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string",
+            "description": "原始JSON报文"
+          },
+          "status": {
+            "type": "integer",
+            "enum": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          "retryCount": {
+            "type": "integer"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "lastAttemptAt": {
+            "type": "string"
+          },
+          "lastError": {
+            "type": "string"
+          },
+          "nextRetryAt": {
+            "type": "string"
+          },
+          "availableAt": {
+            "type": "string"
+          },
+          "sourceNotificationId": {
+            "type": "integer"
+          },
+          "simulationMode": {
+            "type": "string"
+          },
+          "simulationEnabled": {
+            "type": "boolean"
+          },
+          "attempts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CallbackAttempt"
+            }
+          }
+        },
+        "required": []
+      },
+      "Backup": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "configIncluded": {
+            "type": "boolean"
+          }
+        },
+        "required": []
+      },
+      "Channel": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "configured": {
+            "type": "boolean"
+          },
+          "reachable": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": []
+      },
+      "OperationRun": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "lastRunAt": {
+            "type": "string"
+          },
+          "lastError": {
+            "type": "string"
+          }
+        },
+        "required": []
+      },
+      "OperationsStatus": {
+        "type": "object",
+        "properties": {
+          "database": {
+            "type": "string"
+          },
+          "schemaVersion": {
+            "type": "integer"
+          },
+          "counts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          },
+          "runs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OperationRun"
+            }
+          },
+          "channels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Channel"
+            }
+          },
+          "settings": {
+            "$ref": "#/components/schemas/OperationSettings"
+          }
+        },
+        "required": []
+      },
+      "TeamUser": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "username": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "Admin",
+              "SuperAdmin"
+            ]
+          },
+          "isActive": {
+            "type": "boolean"
+          },
+          "groupIds": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          },
+          "createdAt": {
+            "type": "string"
+          }
+        },
+        "required": []
+      },
+      "Session": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "clientIp": {
+            "type": "string"
+          },
+          "userAgent": {
+            "type": "string"
+          },
+          "current": {
+            "type": "boolean"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "lastSeenAt": {
+            "type": "string"
+          },
+          "expiresAt": {
+            "type": "string"
+          }
+        },
+        "required": []
+      }
+    }
+  }
+}

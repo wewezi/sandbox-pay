@@ -1,0 +1,55 @@
+/* Shared by the document and the component ShadowRoots. */
+:root,
+:host,
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+/* Non-auto standard properties override WebKit's rounded thumb styling. */
+@supports selector(::-webkit-scrollbar) {
+  :root, :host, * {
+    scrollbar-width: auto;
+    scrollbar-color: auto;
+  }
+
+  :host::-webkit-scrollbar, *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  :host::-webkit-scrollbar-track, *::-webkit-scrollbar-track,
+  :host::-webkit-scrollbar-corner, *::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
+  :host::-webkit-scrollbar-thumb, *::-webkit-scrollbar-thumb {
+    min-width: 28px;
+    min-height: 28px;
+    border: 2px solid transparent;
+    border-radius: 999px;
+    background-color: var(--scrollbar-thumb);
+    background-clip: padding-box;
+  }
+
+  :host::-webkit-scrollbar-thumb:hover, *::-webkit-scrollbar-thumb:hover {
+    background-color: var(--scrollbar-thumb-hover);
+  }
+
+  :host::-webkit-scrollbar-thumb:active, *::-webkit-scrollbar-thumb:active {
+    background-color: var(--scrollbar-thumb-active);
+  }
+
+  :host::-webkit-scrollbar-button, *::-webkit-scrollbar-button {
+    display: none;
+    width: 0;
+    height: 0;
+  }
+}
+
+@media (forced-colors: active) {
+  :root, :host, * { scrollbar-color: auto; }
+  :host::-webkit-scrollbar-thumb, *::-webkit-scrollbar-thumb {
+    background-color: ButtonText;
+  }
+}

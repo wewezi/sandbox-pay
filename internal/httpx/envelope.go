@@ -5,11 +5,9 @@ import (
 	"net/http"
 )
 
-// envelope 统一响应信封。前端 public/app.js 按 code !== 200 判失败、从 data 取数据，
-// 改结构要连前端一起改。
-//
-// 形状必须保持 { code, msg, message, data } —— 前端 app.js 的 request()
-// 认 code !== 200 为失败、从 data 取业务数据、从 msg/message 取错误文案。
+// envelope 统一响应信封，形状为 { code, msg, message, data }。
+// 前端 web/app.ts 同时检查 HTTP 状态与 code，从 data 取业务数据，
+// 优先读取 message，其次读取 msg 作为错误文案；改结构时同步更新前端。
 type envelope struct {
 	Code    int    `json:"code"`
 	Msg     string `json:"msg"`

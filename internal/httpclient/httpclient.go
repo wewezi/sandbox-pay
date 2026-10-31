@@ -9,8 +9,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -18,6 +20,8 @@ import (
 type Response struct {
 	Status int
 	Data   any
+	// BodySummary is bounded raw response text. Callers must redact it before storing.
+	BodySummary string
 }
 
 // Client 用到的两个方法，测试里塞假的。
@@ -34,18 +38,36 @@ type Default struct {
 }
 
 // New 返回默认客户端。
-func New() *Default { return &Default{HTTP: &http.Client{}} }
+func New() *Default { return NewWithOptions(Options{}) }
 
-func readJSON(resp *http.Response) any {
-	data, err := io.ReadAll(resp.Body)
-	if err != nil || len(data) == 0 {
-		return nil
+const maxResponseBytes = 1 << 20
+
+func readJSON(resp *http.Response) (any, error) {
+	data, _, err := readResponse(resp)
+	return data, err
+}
+
+func readResponse(resp *http.Response) (any, string, error) {
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	if err != nil {
+		return nil, "", err
+	}
+	if len(data) > maxResponseBytes {
+		return nil, "", fmt.Errorf("HTTP response exceeds %d bytes", maxResponseBytes)
+	}
+	summaryBytes := data
+	if len(summaryBytes) > 2048 {
+		summaryBytes = summaryBytes[:2048]
+	}
+	summary := strings.ToValidUTF8(string(summaryBytes), "")
+	if len(data) == 0 {
+		return nil, "", nil
 	}
 	var v any
 	if err := json.Unmarshal(data, &v); err != nil {
-		return nil
+		return nil, summary, nil
 	}
-	return v
+	return v, summary, nil
 }
 
 func (d *Default) Get(url string, timeout time.Duration) (*Response, error) {
@@ -60,7 +82,11 @@ func (d *Default) Get(url string, timeout time.Duration) (*Response, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	return &Response{Status: resp.StatusCode, Data: readJSON(resp)}, nil
+	data, summary, err := readResponse(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &Response{Status: resp.StatusCode, Data: data, BodySummary: summary}, nil
 }
 
 func (d *Default) Post(url string, body any, headers map[string]string, timeout time.Duration) (*Response, error) {
@@ -99,5 +125,9 @@ func (d *Default) Post(url string, body any, headers map[string]string, timeout 
 		return nil, err
 	}
 	defer resp.Body.Close()
-	return &Response{Status: resp.StatusCode, Data: readJSON(resp)}, nil
+	data, summary, err := readResponse(resp)
+	if err != nil {
+		return &Response{Status: resp.StatusCode}, err
+	}
+	return &Response{Status: resp.StatusCode, Data: data, BodySummary: summary}, nil
 }

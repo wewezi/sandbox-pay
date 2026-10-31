@@ -14,6 +14,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      # 先生成静态产物，Go 的 embed 编译和静态资源测试依赖它。
+      - name: Frontend build and type check
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
       # go.mod 里锁的就是这个版本，装同版本才测得准
       - uses: actions/setup-go@v5
         with:
@@ -39,14 +50,7 @@ jobs:
       # 单测 + e2e 同一条命令。JWT_SECRET 是测试自己灌的，这里给一个
       # 只是为了让 .env 缺失时的启动路径也有东西可读。
       - name: Test
-        run: go test ./... -count=1
+        run: go test -race ./... -count=1
         env:
-          JWT_SECRET: ci-test-secret
+          JWT_SECRET: ci-only-0123456789abcdef-fedcba9876543210
           LOG_SILENT: "1"
-
-      # 前端没有构建步骤，类型检查靠 tsc 读 JSDoc。
-      # typescript 是唯一一个 devDependency，npm ci 按 lock 装，可复现。
-      - name: Frontend type check
-        run: |
-          npm ci --no-audit --no-fund
-          npx tsc -p public --noEmit

@@ -4,6 +4,7 @@ import (
 	"sandbox-pay/internal/config"
 	"sandbox-pay/internal/db"
 	"sandbox-pay/internal/gateways"
+	"sandbox-pay/internal/geoip"
 	"sandbox-pay/internal/httpclient"
 	"sandbox-pay/internal/services"
 )
@@ -13,17 +14,20 @@ import (
 // 依赖关系一眼能看完，顺序就是构造顺序 —— 不需要 provider / inject / exports
 // 那一整套元数据。服务之间全靠构造函数传，测试里各自 new 一个塞假依赖即可。
 type Container struct {
-	Config config.Config
-	Store  *db.Store
+	Config      config.Config
+	Store       *db.Store
+	Geolocation *geoip.Locator
 
-	Admin   *services.AdminService
-	Auth    *services.AuthService
-	Fees    *services.FeeCalculator
-	Rates   *services.ExchangeRateService
-	Notify  *services.NotifyService
-	Groups  *services.GroupService
-	Payment *services.PaymentService
-	Refund  *services.RefundService
+	Admin      *services.AdminService
+	Usage      *services.UsageService
+	Auth       *services.AuthService
+	Fees       *services.FeeCalculator
+	Rates      *services.ExchangeRateService
+	Notify     *services.NotifyService
+	Groups     *services.GroupService
+	Payment    *services.PaymentService
+	Refund     *services.RefundService
+	Operations *services.OperationsService
 
 	Alipay    *gateways.Alipay
 	PayPal    *gateways.PayPal
@@ -38,27 +42,33 @@ func NewContainer(cfg config.Config, store *db.Store) *Container {
 
 	fees := services.NewFeeCalculator(cfg)
 	rates := services.NewExchangeRateService(httpc, cfg)
-	notify := services.NewNotifyService(store.Notifies, httpc)
+	notifyHTTP := httpclient.NewWithOptions(httpclient.Options{
+		AllowPrivateNetwork: config.Bool(cfg, "NOTIFY_ALLOW_PRIVATE_NETWORK"),
+	})
+	notify := services.NewNotifyService(store.Notifies, notifyHTTP)
 	groups := services.NewGroupService(store, cfg)
 	payment := services.NewPaymentService(store, notify, fees)
 
 	alipay := gateways.NewAlipay(cfg, store, payment)
 	paypal := gateways.NewPayPal(cfg, store, rates, payment)
-	nativePay := gateways.NewNativePay(cfg, store, payment, alipay)
+	nativePay := gateways.NewNativePay(cfg, store, payment, alipay, rates)
 
 	return &Container{
-		Config:    cfg,
-		Store:     store,
-		Admin:     services.NewAdminService(store),
-		Auth:      services.NewAuthService(store, cfg),
-		Fees:      fees,
-		Rates:     rates,
-		Notify:    notify,
-		Groups:    groups,
-		Payment:   payment,
-		Refund:    services.NewRefundService(store, payment, alipay, paypal),
-		Alipay:    alipay,
-		PayPal:    paypal,
-		NativePay: nativePay,
+		Config:      cfg,
+		Store:       store,
+		Geolocation: geoip.New(),
+		Admin:       services.NewAdminService(store),
+		Usage:       services.NewUsageService(store),
+		Auth:        services.NewAuthService(store, cfg),
+		Fees:        fees,
+		Rates:       rates,
+		Notify:      notify,
+		Groups:      groups,
+		Payment:     payment,
+		Refund:      services.NewRefundService(store, payment, alipay, paypal),
+		Operations:  services.NewOperationsService(store, cfg),
+		Alipay:      alipay,
+		PayPal:      paypal,
+		NativePay:   nativePay,
 	}
 }

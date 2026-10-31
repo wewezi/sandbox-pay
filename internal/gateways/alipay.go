@@ -2,9 +2,14 @@ package gateways
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +36,8 @@ type Alipay struct {
 
 	mu  sync.Mutex
 	cli *alipay.Client
+	// Only the refund operation needs this narrow seam for transport tests.
+	refundSDK alipayRefundClient
 }
 
 // NewAlipay 构造。
@@ -67,12 +74,12 @@ func (a *Alipay) client() (*alipay.Client, error) {
 	cli, err := alipay.New(appID, privateKey, false,
 		alipay.WithSandboxGateway(config.String(a.cfg, "ALIPAY_SERVER_URL")))
 	if err != nil {
-		return nil, err
+		return nil, gatewayConfigurationFailure("ALIPAY_PRIVATE_KEY", err)
 	}
 	// 不加载支付宝公钥就全挂：响应验签（NeedVerify=true）和 notify 的
 	// VerifySign 都靠它提供验签器，缺了直接 ErrAliPublicKeyNotFound。
 	if err := cli.LoadAliPayPublicKey(publicKey); err != nil {
-		return nil, err
+		return nil, gatewayConfigurationFailure("ALIPAY_PUBLIC_KEY", err)
 	}
 
 	a.log.Log("Alipay SDK initialized")
@@ -96,18 +103,22 @@ func (a *Alipay) CreatePagePay(orderNo, baseUrl string) (*PayResult, error) {
 	if order.Status != db.StatusPending {
 		return nil, httperr.BadRequest("订单状态非待支付")
 	}
+	if !order.ExpireAt.After(time.Now()) {
+		return nil, httperr.Conflict("订单已过期，请重新下单")
+	}
 
 	clientURL := strings.TrimSpace(a.cfg.Get("CLIENT_URL"))
 	if clientURL == "" {
 		clientURL = baseUrl
 	}
-	returnURL := clientURL + "/cashier.html?orderNo=" + orderNo
+	returnURL := clientURL + "/cashier?orderNo=" + orderNo
 	if order.ReturnURL != nil && *order.ReturnURL != "" {
-		sep := "?"
-		if strings.Contains(*order.ReturnURL, "?") {
-			sep = "&"
+		if target, err := url.Parse(*order.ReturnURL); err == nil {
+			query := target.Query()
+			query.Set("orderNo", orderNo)
+			target.RawQuery = query.Encode()
+			returnURL = target.String()
 		}
-		returnURL = *order.ReturnURL + sep + "orderNo=" + orderNo
 	}
 
 	// 取 SDK 放在「业务失败分支」之外，让「渠道未配置」以 400 原样抛出，
@@ -125,11 +136,12 @@ func (a *Alipay) CreatePagePay(orderNo, baseUrl string) (*PayResult, error) {
 			OutTradeNo:  order.OrderNo,
 			TotalAmount: money.ToYuanString(order.Amount),
 			ProductCode: "FAST_INSTANT_TRADE_PAY",
+			TimeExpire:  alipayPaymentDeadline(order.ExpireAt),
 		},
 	})
 	if err != nil {
-		a.log.Error(fmt.Sprintf("Alipay page pay error: %s", err))
-		return nil, httperr.Internal("生成支付宝支付表单失败")
+		a.log.Error("Alipay page pay error: " + GatewayErrorSummary(err, "alipay"))
+		return nil, err
 	}
 
 	a.log.Log(fmt.Sprintf("Alipay page pay form generated for order: %s", orderNo))
@@ -158,7 +170,7 @@ func (a *Alipay) HandleNotify(params map[string]string) (string, error) {
 	tradeStatus := params["trade_status"]
 	if tradeStatus == "TRADE_SUCCESS" || tradeStatus == "TRADE_FINISHED" {
 		// 支付宝回的是 "10.00" 这种元字符串，边界上转成分。
-		if _, err := a.payments.MarkPaid(params["out_trade_no"], strp(params["trade_no"]),
+		if _, err := a.payments.MarkPaidForChannel("alipay", params["out_trade_no"], strp(params["trade_no"]),
 			money.YuanStringToCents(params["total_amount"]), "CNY"); err != nil {
 			// 金额不匹配或其他校验失败 —— 记下来并让支付宝稍后重试。
 			a.log.Error(fmt.Sprintf("Alipay notify rejected for %s: %s", params["out_trade_no"], err))
@@ -176,7 +188,7 @@ func (a *Alipay) HandleNotify(params map[string]string) (string, error) {
 // 收银台照常渲染线下打款信息。
 func (a *Alipay) CreateQrPay(orderNo, baseUrl string) string {
 	order, err := a.store.Orders.FindByOrderNo(orderNo, false)
-	if err != nil || order == nil || order.Status != db.StatusPending {
+	if err != nil || order == nil || order.Status != db.StatusPending || order.PayMethod != "alipay" || !order.ExpireAt.After(time.Now()) {
 		return ""
 	}
 
@@ -189,7 +201,7 @@ func (a *Alipay) CreateQrPay(orderNo, baseUrl string) string {
 
 	sdk, err := a.client()
 	if err != nil {
-		a.log.Error(fmt.Sprintf("Alipay precreate error: %s", err))
+		a.log.Error("Alipay precreate error: " + GatewayErrorSummary(err, "alipay"))
 		return ""
 	}
 
@@ -199,13 +211,14 @@ func (a *Alipay) CreateQrPay(orderNo, baseUrl string) string {
 			Subject:     order.ProductName,
 			OutTradeNo:  order.OrderNo,
 			TotalAmount: money.ToYuanString(order.Amount),
+			TimeExpire:  alipayPaymentDeadline(order.ExpireAt),
 			// 当面付销售产品码。Trade.ProductCode 没有 omitempty，
 			// 不填会往 biz_content 里发一个空串。
 			ProductCode: "FACE_TO_FACE_PAYMENT",
 		},
 	})
 	if err != nil {
-		a.log.Error(fmt.Sprintf("Alipay precreate error: %s", err))
+		a.log.Error("Alipay precreate error: " + GatewayErrorSummary(err, "alipay"))
 		return ""
 	}
 	if rsp == nil {
@@ -226,46 +239,127 @@ func (a *Alipay) CreateQrPay(orderNo, baseUrl string) string {
 	return rsp.QRCode
 }
 
-// Refund 发起支付宝退款，用 out_request_no 做幂等。
-//
-// 网关自己吞掉所有错误：返回空串 = 失败，由 RefundService 统一转成
-// 「上游退款失败」。实现 services.Refunder。
+// Alipay interprets its absolute deadline in UTC+8. Reusing the stored
+// deadline prevents a later URL or QR retry from extending the payment window.
+func alipayPaymentDeadline(deadline time.Time) string {
+	return deadline.In(time.FixedZone("CST", 8*60*60)).Format("2006-01-02 15:04:05")
+}
+
+type alipayRefundClient interface {
+	TradeRefund(context.Context, alipay.TradeRefund) (*alipay.TradeRefundRsp, error)
+}
+
+// Refund preserves the legacy interface. New callers provide their durable
+// operation ID through RefundWithStatus instead of generating an ID per retry.
 func (a *Alipay) Refund(orderNo string, refundCents int64, reason string) string {
+	var randomID [16]byte
+	if _, err := rand.Read(randomID[:]); err != nil {
+		return ""
+	}
+	id, status, err := a.RefundWithStatus(orderNo, refundCents, reason, "RF_"+hex.EncodeToString(randomID[:]))
+	if err != nil || status != "COMPLETED" {
+		return ""
+	}
+	return id
+}
+
+// RefundWithStatus reuses out_request_no for retries. A timeout or an invalid
+// response cannot prove that Alipay rejected the refund, so it remains UNKNOWN.
+func (a *Alipay) RefundWithStatus(orderNo string, refundCents int64, reason, requestID string) (string, string, error) {
+	if orderNo == "" || refundCents <= 0 || requestID == "" || len(requestID) > 64 ||
+		strings.IndexFunc(requestID, func(c rune) bool {
+			return !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-')
+		}) >= 0 {
+		return "", "FAILED", httperr.BadRequest("支付宝退款参数无效")
+	}
 	if reason == "" {
 		reason = "Group initiated refund"
 	}
-	outRequestNo := fmt.Sprintf("RF_%s_%d", orderNo, time.Now().UnixMilli())
-
-	sdk, err := a.client()
-	if err != nil {
-		a.log.Error(fmt.Sprintf("Alipay refund error for %s: %s", orderNo, err))
-		return ""
+	sdk := a.refundSDK
+	if sdk == nil {
+		client, err := a.client()
+		if err != nil {
+			return "", "FAILED", err
+		}
+		sdk = client
 	}
-
-	rsp, err := sdk.TradeRefund(context.Background(), alipay.TradeRefund{
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	rsp, err := sdk.TradeRefund(ctx, alipay.TradeRefund{
 		OutTradeNo:   orderNo,
 		RefundAmount: money.ToYuanString(refundCents),
 		RefundReason: reason,
-		OutRequestNo: outRequestNo,
+		OutRequestNo: requestID,
 	})
 	if err != nil {
-		a.log.Error(fmt.Sprintf("Alipay refund error for %s: %s", orderNo, err))
-		return ""
+		var businessError *alipay.Error
+		if errors.As(err, &businessError) && definiteAlipayRefundFailure(*businessError) {
+			return "", "FAILED", err
+		}
+		return "", "UNKNOWN", err
 	}
 	if rsp == nil {
-		return ""
+		return "", "UNKNOWN", fmt.Errorf("支付宝退款响应为空")
 	}
+	if rsp.Code != alipay.CodeSuccess {
+		if definiteAlipayRefundFailure(rsp.Error) {
+			return "", "FAILED", rsp.Error
+		}
+		return "", "UNKNOWN", rsp.Error
+	}
+	if rsp.OutTradeNo != orderNo || !validAlipayRefundAmount(rsp.RefundFee, refundCents) ||
+		(rsp.FundChange != "Y" && rsp.FundChange != "N") {
+		return "", "UNKNOWN", fmt.Errorf("支付宝退款响应与请求不匹配")
+	}
+	// N with a successful, matching response confirms this operation was
+	// processed before; replaying it must not become another refund.
+	a.log.Log(fmt.Sprintf("Alipay refund confirmed for %s: %s", orderNo, requestID))
+	return requestID, "COMPLETED", nil
+}
 
-	// fund_change=Y 才算钱真的动了 —— 重复退款时支付宝回成功但不改资金。
-	ok := (rsp.Code == alipay.CodeSuccess || rsp.Msg == "Success") && rsp.FundChange == "Y"
-	if ok {
-		a.log.Log(fmt.Sprintf("Alipay refund success for %s: %s", orderNo, outRequestNo))
-		return outRequestNo
+func definiteAlipayRefundFailure(response alipay.Error) bool {
+	switch response.Code {
+	case alipay.CodeInvalidAuthToken, alipay.CodeMissingParam, alipay.CodeInvalidParam,
+		alipay.CodeInsufficientConditions, alipay.CodeCallLimited, alipay.CodePermissionDenied:
+		return true
+	case alipay.CodeBusinessFailed:
+		return !strings.Contains(response.SubCode, "SYSTEM_ERROR") &&
+			!strings.Contains(response.SubCode, "SYSTEM_BUSY")
+	default:
+		return false
 	}
-	if raw, err := json.Marshal(rsp); err == nil {
-		a.log.Warn(fmt.Sprintf("Alipay refund non-success for %s: %s", orderNo, raw))
+}
+
+func validAlipayRefundAmount(value string, expected int64) bool {
+	parts := strings.Split(value, ".")
+	if len(parts) > 2 || parts[0] == "" || expected <= 0 {
+		return false
 	}
-	return ""
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+		for _, c := range part {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+	}
+	whole, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || whole > (math.MaxInt64-99)/100 {
+		return false
+	}
+	var fraction int64
+	if len(parts) == 2 {
+		if len(parts[1]) > 2 {
+			return false
+		}
+		fraction, _ = strconv.ParseInt(parts[1], 10, 64)
+		if len(parts[1]) == 1 {
+			fraction *= 10
+		}
+	}
+	return whole*100+fraction == expected
 }
 
 // QueryAlipayTrade 主动查单：确认支付宝那边真收到钱了才入账。
@@ -275,13 +369,17 @@ func (a *Alipay) Refund(orderNo string, refundCents int64, reason string) string
 func (a *Alipay) QueryAlipayTrade(orderNo string) bool {
 	sdk, err := a.client()
 	if err != nil {
-		a.log.Error(fmt.Sprintf("Alipay queryAlipayTrade error for %s: %s", orderNo, err))
+		a.log.Error("Alipay query error for " + orderNo + ": " + GatewayErrorSummary(err, "alipay"))
 		return false
 	}
 
-	rsp, err := sdk.TradeQuery(context.Background(), alipay.TradeQuery{OutTradeNo: orderNo})
+	// The cashier waits for this read before showing the order. A stalled
+	// provider must release it promptly so other payment methods remain usable.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	rsp, err := sdk.TradeQuery(ctx, alipay.TradeQuery{OutTradeNo: orderNo})
 	if err != nil {
-		a.log.Error(fmt.Sprintf("Alipay queryAlipayTrade error for %s: %s", orderNo, err))
+		a.log.Error("Alipay query error for " + orderNo + ": " + GatewayErrorSummary(err, "alipay"))
 		return false
 	}
 	if rsp == nil {
@@ -298,7 +396,7 @@ func (a *Alipay) QueryAlipayTrade(orderNo string) bool {
 		return false
 	}
 
-	if _, err := a.payments.MarkPaid(orderNo, &tradeNo, totalAmountCents, "CNY"); err != nil {
+	if _, err := a.payments.MarkPaidForChannel("alipay", orderNo, &tradeNo, totalAmountCents, "CNY"); err != nil {
 		a.log.Error(fmt.Sprintf("Alipay active query markPaid rejected for %s: %s", orderNo, err))
 		return false
 	}

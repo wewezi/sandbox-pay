@@ -45,17 +45,6 @@ var securityHeaders = map[string]string{
 	"X-XSS-Protection":                  "0",
 }
 
-// Middleware 中间件：包一层 handler。
-type Middleware func(http.Handler) http.Handler
-
-// Chain 按顺序套：第一个是最外层。
-func Chain(h http.Handler, mws ...Middleware) http.Handler {
-	for i := len(mws) - 1; i >= 0; i-- {
-		h = mws[i](h)
-	}
-	return h
-}
-
 // Correlation 关联 ID：请求带了就沿用，没带就生成，回一份给响应头。
 //
 // 必须在 handler 之前写头 —— net/http 的 ResponseWriter 在第一次 WriteHeader

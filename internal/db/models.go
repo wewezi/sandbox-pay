@@ -35,12 +35,14 @@ const (
 
 // User 后台用户。Password 是 bcrypt hash。
 type User struct {
-	ID        int64
-	Username  string
-	Password  string
-	Role      string
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID             int64
+	Username       string
+	Password       string
+	Role           string
+	IsActive       bool
+	SessionVersion int64
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 // Group 分组。停用后它名下所有 Key 都调不通（守卫连表查 isActive）。
@@ -50,23 +52,24 @@ type Group struct {
 	IsActive  bool
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	// WebhookSecret signs callbacks independently of API authentication tokens.
+	WebhookSecret string `json:"-"`
 }
 
 // APIKey 一把 API Key。一个分组可以有多把，用来轮换或区分环境。
 //
-// 两个方向都用它：
-//   - 入站 —— 接入方带 Authorization: Bearer <key> 调网关
-//   - 出站 —— 我们回调接入方时拿它当 HMAC 密钥签名，接入方照此验签
-//
-// 明文存储：自托管沙箱、全假数据，加密只增加排错成本。
-// 沙箱页还要把它显示出来给人抄，存哈希就没法显示了。
+// The database stores a one-way hash. Key is populated only by Insert's
+// issuance receipt and is empty on subsequent reads.
 type APIKey struct {
 	ID      int64
 	GroupID int64
 	// Name 备注名，纯给人看的（"本地开发"、"CI"），不参与鉴权。
-	Name     string
-	Key      string
-	IsActive bool
+	Name      string
+	Key       string `json:"-"`
+	KeyHash   string `json:"-"`
+	KeyPrefix string
+	KeySuffix string
+	IsActive  bool
 	// LastUsedAt 守卫每次校验通过后刷新，用来判断哪把 Key 还在用。
 	LastUsedAt *time.Time
 	CreatedAt  time.Time
@@ -98,24 +101,34 @@ type PaymentOrder struct {
 	ForeignCurrency   *string
 	ExternalOrderNo   *string
 	ThirdPartyTradeNo *string
+	// ProviderOrderID 绑定 PayPal 上游订单，回调 token 必须与它一致。
+	ProviderOrderID *string
 	// RefundedAmount 整数分。
 	RefundedAmount int64
 	RefundTradeNo  *string
 	RefundAt       *time.Time
 	// ChannelCost 上游渠道（支付宝/PayPal）收的成本，整数分。
 	ChannelCost int64
-	// Fee Sandbox Pay 向接入方收的手续费，整数分。
+	// Fee Mintweft 向接入方收的手续费，整数分。
 	Fee int64
 	// SettleAmount 扣掉 fee 后应结给接入方的金额，markPaid 时算出来，整数分。
 	SettleAmount int64
 	ReturnURL    *string
 	NotifyURL    *string
 	GroupID      *int64
-	// APIKeyID 下单时用的那把 Key。回调签名认它 —— 谁下的单谁验签。
-	// 后台测试下单没有 Key 上下文，这里是 nil；那些单也不带 notifyUrl。
+	// ClientIP and ClientLocation capture the request source at order creation.
+	// ClientLocation is the JSON snapshot from the local IP database.
+	ClientIP       *string
+	ClientLocation *string
+	// SigningSecret is a private snapshot, never exposed in order DTOs.
+	// Legacy orders retain their API token for version 1 signatures; new orders
+	// snapshot the project's independent webhook secret for version 2.
+	SigningSecret    *string `json:"-"`
+	SignatureVersion int
+	// APIKeyID records the authentication token used to create the order.
 	APIKeyID *int64
 	UserID   int64
-	// APIKey JOIN 出来的 Key，只有需要它签回调时才带上（withAPIKey）。
+	// APIKey is optional joined authentication metadata, without plaintext.
 	APIKey *APIKey
 }
 
@@ -131,4 +144,49 @@ type NotifyQueue struct {
 	CreatedAt     time.Time
 	LastAttemptAt *time.Time
 	LastError     *string
+	AvailableAt   *time.Time
+}
+
+const (
+	RefundProcessing = "processing"
+	RefundPending    = "pending"
+	RefundUnknown    = "unknown"
+	RefundCompleted  = "completed"
+	RefundFailed     = "failed"
+)
+
+// RefundOperation 保留每次退款的请求标识、在途状态和上游单号。
+type RefundOperation struct {
+	ID        string
+	RequestID string
+	Reason    string
+	OrderNo   string
+	Amount    int64
+	TradeNo   *string
+	Status    string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// UsageLog records safe API metadata. Credential and project names are
+// snapshots so later renames or deletions cannot rewrite historical evidence.
+// No authentication credentials, headers or request/response bodies are stored.
+type UsageLog struct {
+	ID             int64
+	RequestID      string
+	Method         string
+	Path           string
+	StatusCode     int
+	DurationMs     float64
+	GroupID        *int64
+	GroupName      string
+	APIKeyID       *int64
+	APIKeyName     string
+	KeyPrefix      string
+	KeySuffix      string
+	ClientIP       string
+	ClientLocation string
+	OrderNo        string
+	ErrorMessage   string
+	CreatedAt      time.Time
 }

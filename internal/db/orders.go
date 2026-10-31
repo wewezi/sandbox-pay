@@ -8,7 +8,8 @@ import (
 )
 
 // OrdersRepo payment_orders 的数据访问。
-// 需要 order.APIKey.Key 签回调的地方走 withAPIKey 版本，其余查询不 JOIN。
+// withAPIKey optionally joins authentication metadata; signing secrets are
+// independent snapshots on the order.
 type OrdersRepo struct {
 	ex executor
 }
@@ -19,6 +20,9 @@ var orderColumns = []string{
 	"foreignAmount", "foreignCurrency", "externalOrderNo", "thirdPartyTradeNo",
 	"refundedAmount", "refundTradeNo", "refundAt", "channelCost", "fee",
 	"settleAmount", "returnUrl", "notifyUrl", "groupId", "apiKeyId", "userId",
+	"providerOrderId",
+	"clientIp", "clientLocation",
+	"signingSecret", "signatureVersion",
 }
 
 // joinAPIKey 只有需要签回调时才 JOIN，Key 列加 k_ 前缀避免和订单列撞名。
@@ -29,7 +33,7 @@ const joinAPIKey = ` LEFT JOIN "api_keys" k ON k."id" = o."apiKeyId"`
 // apiKeyAllColumns（不带逗号），拼上去会变成 `SELECT , k."id"` 直接语法错误。
 const apiKeyColumns = `,
   k."id", k."groupId", k."name", k."key",
-  k."isActive", k."lastUsedAt", k."createdAt", k."updatedAt"`
+  k."isActive", k."lastUsedAt", k."createdAt", k."updatedAt", k."keyPrefix", k."keySuffix"`
 
 func selectSQL(withAPIKey bool) string {
 	cols := make([]string, 0, len(orderColumns))
@@ -89,22 +93,26 @@ func boolFromInt(n int64) bool { return n != 0 }
 
 func scanOrder(sc scanner, withAPIKey bool) (*PaymentOrder, error) {
 	var (
-		o          PaymentOrder
-		created    sql.NullString
-		updated    sql.NullString
-		expire     sql.NullString
-		payAt      sql.NullString
-		refundAt   sql.NullString
-		exRate     sql.NullFloat64
-		foreignAmt sql.NullInt64
-		foreignCur sql.NullString
-		extOrderNo sql.NullString
-		thirdParty sql.NullString
-		refundTrNo sql.NullString
-		returnURL  sql.NullString
-		notifyURL  sql.NullString
-		groupID    sql.NullInt64
-		apiKeyID   sql.NullInt64
+		o              PaymentOrder
+		created        sql.NullString
+		updated        sql.NullString
+		expire         sql.NullString
+		payAt          sql.NullString
+		refundAt       sql.NullString
+		exRate         sql.NullFloat64
+		foreignAmt     sql.NullInt64
+		foreignCur     sql.NullString
+		extOrderNo     sql.NullString
+		thirdParty     sql.NullString
+		refundTrNo     sql.NullString
+		returnURL      sql.NullString
+		notifyURL      sql.NullString
+		groupID        sql.NullInt64
+		apiKeyID       sql.NullInt64
+		providerID     sql.NullString
+		clientIP       sql.NullString
+		clientLocation sql.NullString
+		signingSecret  sql.NullString
 	)
 
 	dest := []any{
@@ -113,18 +121,21 @@ func scanOrder(sc scanner, withAPIKey bool) (*PaymentOrder, error) {
 		&foreignAmt, &foreignCur, &extOrderNo, &thirdParty,
 		&o.RefundedAmount, &refundTrNo, &refundAt, &o.ChannelCost, &o.Fee,
 		&o.SettleAmount, &returnURL, &notifyURL, &groupID, &apiKeyID, &o.UserID,
+		&providerID,
+		&clientIP, &clientLocation,
+		&signingSecret, &o.SignatureVersion,
 	}
 	if withAPIKey {
 		// apiKeyId 为空（后台/测试下单）时 LEFT JOIN 全是 NULL ——
 		// 直接扫进 int64 会报「converting NULL」，所以 Key 的列走 Null* 类型，
 		// 扫完再决定 o.APIKey 是不是 nil。签回调的地方靠它判「这单有没有 Key」。
 		var keyID, keyGroupID sql.NullInt64
-		var keyName, keyValue sql.NullString
+		var keyName, keyHash, keyPrefix, keySuffix sql.NullString
 		var keyActive sql.NullInt64
 		var keyLastUsed, keyCreated, keyUpdated sql.NullString
 		dest = append(dest,
-			&keyID, &keyGroupID, &keyName, &keyValue,
-			&keyActive, &keyLastUsed, &keyCreated, &keyUpdated)
+			&keyID, &keyGroupID, &keyName, &keyHash,
+			&keyActive, &keyLastUsed, &keyCreated, &keyUpdated, &keyPrefix, &keySuffix)
 		if err := sc.Scan(dest...); err != nil {
 			return nil, err
 		}
@@ -135,7 +146,9 @@ func scanOrder(sc scanner, withAPIKey bool) (*PaymentOrder, error) {
 				ID:         keyID.Int64,
 				GroupID:    keyGroupID.Int64,
 				Name:       keyName.String,
-				Key:        keyValue.String,
+				KeyHash:    keyHash.String,
+				KeyPrefix:  keyPrefix.String,
+				KeySuffix:  keySuffix.String,
 				IsActive:   boolFromInt(keyActive.Int64),
 				LastUsedAt: nullTime(keyLastUsed),
 				CreatedAt:  fromSQL(keyCreated.String),
@@ -164,6 +177,10 @@ func scanOrder(sc scanner, withAPIKey bool) (*PaymentOrder, error) {
 	o.NotifyURL = nullString(notifyURL)
 	o.GroupID = nullInt64(groupID)
 	o.APIKeyID = nullInt64(apiKeyID)
+	o.ProviderOrderID = nullString(providerID)
+	o.ClientIP = nullString(clientIP)
+	o.ClientLocation = nullString(clientLocation)
+	o.SigningSecret = nullString(signingSecret)
 	return &o, nil
 }
 
@@ -216,6 +233,9 @@ func (r *OrdersRepo) Insert(o *PaymentOrder) error {
 	cols := make([]string, 0, len(orderColumns))
 	placeholders := make([]string, 0, len(orderColumns))
 	args := make([]any, 0, len(orderColumns))
+	if o.SignatureVersion == 0 {
+		o.SignatureVersion = 1
+	}
 	vals := map[string]any{
 		"id": o.ID, "orderNo": o.OrderNo, "amount": o.Amount,
 		"productName": o.ProductName, "payMethod": o.PayMethod, "status": o.Status,
@@ -226,7 +246,10 @@ func (r *OrdersRepo) Insert(o *PaymentOrder) error {
 		"refundAt": o.RefundAt, "channelCost": o.ChannelCost, "fee": o.Fee,
 		"settleAmount": o.SettleAmount, "returnUrl": o.ReturnURL,
 		"notifyUrl": o.NotifyURL, "groupId": o.GroupID, "apiKeyId": o.APIKeyID,
-		"userId": o.UserID,
+		"userId":          o.UserID,
+		"providerOrderId": o.ProviderOrderID,
+		"clientIp":        o.ClientIP, "clientLocation": o.ClientLocation,
+		"signingSecret": o.SigningSecret, "signatureVersion": o.SignatureVersion,
 	}
 	for _, c := range orderColumns {
 		cols = append(cols, fmt.Sprintf("%q", c))
@@ -264,6 +287,31 @@ func (r *OrdersRepo) Update(orderNo string, patch map[string]any) error {
 	return err
 }
 
+// BindProviderOrder 保存首次下单的上游标识及汇率；重试不能替换已经绑定的订单。
+func (r *OrdersRepo) BindProviderOrder(orderNo, providerOrderID string, exchangeRate float64, foreignAmount int64, foreignCurrency string) error {
+	if providerOrderID == "" || foreignAmount <= 0 || foreignCurrency == "" {
+		return fmt.Errorf("invalid provider order binding")
+	}
+	result, err := r.ex.Exec(`UPDATE "payment_orders" SET
+	  "exchangeRate" = CASE WHEN "providerOrderId" IS NULL THEN ? ELSE "exchangeRate" END,
+	  "foreignAmount" = ?, "foreignCurrency" = ?, "providerOrderId" = ?, "updatedAt" = ?
+	  WHERE "orderNo" = ? AND "status" = ? AND
+	  ("providerOrderId" IS NULL OR ("providerOrderId" = ? AND "foreignAmount" = ? AND "foreignCurrency" = ?))`,
+		exchangeRate, foreignAmount, foreignCurrency, providerOrderID, nowSQL(), orderNo, StatusPending,
+		providerOrderID, foreignAmount, foreignCurrency)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		return fmt.Errorf("order is not pending or already bound to another provider order")
+	}
+	return nil
+}
+
 // DeleteByOrderNo 删单。
 func (r *OrdersRepo) DeleteByOrderNo(orderNo string) error {
 	_, err := r.ex.Exec(`DELETE FROM "payment_orders" WHERE "orderNo" = ?`, orderNo)
@@ -275,6 +323,12 @@ func (r *OrdersRepo) Count() (int64, error) {
 	var c int64
 	err := r.ex.QueryRow(`SELECT COUNT(*) FROM "payment_orders"`).Scan(&c)
 	return c, err
+}
+
+func (r *OrdersRepo) CountByStatus(status int) (int64, error) {
+	var count int64
+	err := r.ex.QueryRow(`SELECT COUNT(*) FROM "payment_orders" WHERE "status" = ?`, status).Scan(&count)
+	return count, err
 }
 
 // Clear 清空并把自增序列归零。
@@ -305,19 +359,22 @@ func (r *OrdersRepo) ExpirePending(limit int64) (int64, error) {
 
 // SearchOpts 后台列表的过滤 + 分页。
 type SearchOpts struct {
-	GroupID   *int64
-	Status    *int
-	PayMethod string
-	DateFrom  string // YYYY-MM-DD，含当天 0 点
-	DateTo    string // YYYY-MM-DD，含当天 23:59:59
-	Keyword   string
-	Offset    int64
-	Limit     int64
+	GroupID    *int64
+	ProjectIDs []int64
+	Status     *int
+	PayMethod  string
+	DateFrom   string // YYYY-MM-DD，含当天 0 点
+	DateTo     string // YYYY-MM-DD，含当天全部时间
+	UTCOffset  int    // 当地时间相对 UTC 的分钟数；日期筛选使用该时区
+	Keyword    string
+	Offset     int64
+	Limit      int64
 }
 
 // buildWhere 从 opts 拼 WHERE。
 func (o SearchOpts) where() *Where {
 	w := &Where{}
+	w.AddProjectScope(`o."groupId"`, o.ProjectIDs)
 	if o.GroupID != nil {
 		w.Add(`o."groupId" = ?`, *o.GroupID)
 	}
@@ -327,15 +384,10 @@ func (o SearchOpts) where() *Where {
 	if o.PayMethod != "" {
 		w.Add(`o."payMethod" = ?`, o.PayMethod)
 	}
-	if o.DateFrom != "" {
-		w.Add(`o."createdAt" >= ?`, toSQL(parseDateStart(o.DateFrom)))
-	}
-	if o.DateTo != "" {
-		w.Add(`o."createdAt" <= ?`, toSQL(parseDateEnd(o.DateTo)))
-	}
+	addDateRange(w, `o."createdAt"`, o.DateFrom, o.DateTo, o.UTCOffset)
 	if o.Keyword != "" {
 		like := "%" + o.Keyword + "%"
-		w.Add(`(o."orderNo" LIKE ? OR o."externalOrderNo" LIKE ?)`, like, like)
+		w.Add(`(o."orderNo" LIKE ? OR o."externalOrderNo" LIKE ? OR o."productName" LIKE ? OR o."thirdPartyTradeNo" LIKE ?)`, like, like, like, like)
 	}
 	return w
 }
@@ -388,9 +440,10 @@ type Stats struct {
 }
 
 // Stats 后台统计：只回聚合值，不把行读进内存。
-func (r *OrdersRepo) Stats(groupID *int64) (Stats, error) {
+func (r *OrdersRepo) Stats(groupID *int64, scopes ...[]int64) (Stats, error) {
 	var out Stats
 	w := &Where{}
+	w.AddProjectScope(`"groupId"`, firstProjectScope(scopes))
 	w.AddIf(groupID, `"groupId" = ?`, groupID)
 	if err := r.ex.QueryRow(
 		`SELECT COUNT(*) FROM "payment_orders"`+w.SQL(), w.Args()...,
@@ -399,6 +452,7 @@ func (r *OrdersRepo) Stats(groupID *int64) (Stats, error) {
 	}
 
 	paidWhere := &Where{}
+	paidWhere.AddProjectScope(`"groupId"`, firstProjectScope(scopes))
 	paidWhere.AddIf(groupID, `"groupId" = ?`, groupID)
 	paidWhere.Add(`"status" = ?`, int64(StatusPaid))
 	if err := r.ex.QueryRow(

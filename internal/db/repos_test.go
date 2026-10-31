@@ -196,8 +196,8 @@ func TestOrdersRoundTrip(t *testing.T) {
 		if withKey.APIKey == nil {
 			t.Fatal("withAPIKey query returned nil apiKey, want the joined row")
 		}
-		if withKey.APIKey.Key != testAPIKey {
-			t.Errorf("apiKey.key = %q, want %q", withKey.APIKey.Key, testAPIKey)
+		if withKey.APIKey.Key != "" || withKey.APIKey.KeyHash != HashAPIKey(testAPIKey) {
+			t.Error("joined API metadata must retain only the token hash")
 		}
 	})
 
@@ -392,8 +392,8 @@ func TestApiKeys(t *testing.T) {
 		if err != nil || hit == nil {
 			t.Fatalf("FindActiveByKey = (%v, %v), want a hit", hit, err)
 		}
-		if hit.Key.Key != testAPIKey {
-			t.Errorf("key.key = %q, want %q", hit.Key.Key, testAPIKey)
+		if hit.Key.Key != "" || hit.Key.KeyHash != HashAPIKey(testAPIKey) {
+			t.Error("authentication lookup returned plaintext or the wrong hash")
 		}
 		if hit.Group.ID != hit.Key.GroupID {
 			t.Errorf("group.id = %d, want key.groupId %d", hit.Group.ID, hit.Key.GroupID)
@@ -423,13 +423,13 @@ func TestApiKeys(t *testing.T) {
 		if hit != nil {
 			t.Errorf("FindActiveByKey = %+v, want nil for a disabled key", hit)
 		}
-		// 行还在，回调签名还能拿到
+		// Credential metadata remains; order callback secrets are separate.
 		row, err := s.ApiKeys.FindByID(extra.ID)
 		if err != nil || row == nil {
 			t.Fatalf("FindByID = (%v, %v), want the row kept", row, err)
 		}
-		if row.Key != "sp_temp_inactive" {
-			t.Errorf("key = %q, want %q", row.Key, "sp_temp_inactive")
+		if row.Key != "" || row.KeyHash != HashAPIKey("sp_temp_inactive") {
+			t.Error("disabled token metadata must retain only the token hash")
 		}
 	})
 

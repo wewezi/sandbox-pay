@@ -13,7 +13,7 @@ import (
 
 var errorLogger = logger.New("ExceptionFilter")
 
-// Handler 返回 error 即进入统一错误信封，等于原版的 throw。
+// Handler 返回 error 即进入统一错误信封。
 type Handler func(w http.ResponseWriter, r *http.Request) error
 
 // H 把 Handler 适配成 http.HandlerFunc，顺带兜住 panic ——
@@ -71,6 +71,7 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 // writeErrorBody 统一错误信封的 JSON 形状。
 // message 和 msg 都给 —— 前端 pickMessage 两个字段都看。
 func writeErrorBody(w http.ResponseWriter, r *http.Request, status int, message string) {
+	bindUsageError(r.Context(), status, message)
 	writeJSON(w, status, map[string]any{
 		"statusCode":    status,
 		"code":          status,
@@ -85,4 +86,9 @@ func writeErrorBody(w http.ResponseWriter, r *http.Request, status int, message 
 // WriteNotFound 404：统一成同一套信封。
 func WriteNotFound(w http.ResponseWriter, r *http.Request) {
 	writeErrorBody(w, r, http.StatusNotFound, "Cannot "+r.Method+" "+r.URL.Path)
+}
+
+// WriteMethodNotAllowed 路径存在，但不支持请求方法。
+func WriteMethodNotAllowed(w http.ResponseWriter, r *http.Request) {
+	writeErrorBody(w, r, http.StatusMethodNotAllowed, "Method not allowed")
 }

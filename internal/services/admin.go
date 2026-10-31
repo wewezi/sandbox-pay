@@ -5,9 +5,9 @@ import (
 	"math"
 	"strconv"
 	"strings"
-	"time"
 
 	"sandbox-pay/internal/db"
+	"sandbox-pay/internal/geoip"
 	"sandbox-pay/internal/httperr"
 	"sandbox-pay/internal/logger"
 	"sandbox-pay/internal/money"
@@ -37,34 +37,52 @@ type StatsResult struct {
 // TransactionOpts 订单列表的过滤 + 分页。分页参数保持 query 原始字符串，
 // 由 service 自己解析 —— 和原版 Number(page) 的口径对齐。
 type TransactionOpts struct {
-	GroupID   *int64
-	Page      string
-	PageSize  string
-	Status    string
-	PayMethod string
-	DateFrom  string
-	DateTo    string
-	Keyword   string
+	GroupID    *int64
+	ProjectIDs []int64
+	Page       string
+	PageSize   string
+	Status     string
+	PayMethod  string
+	DateFrom   string
+	DateTo     string
+	UTCOffset  int
+	Keyword    string
 }
 
 // TransactionItem 订单列表的一项。金额已经是元。
 type TransactionItem struct {
-	ID                string  `json:"id"`
-	OrderNo           string  `json:"orderNo"`
-	Channel           string  `json:"channel"`
-	Amount            float64 `json:"amount"`
-	RefundedAmount    float64 `json:"refundedAmount"`
-	Fee               float64 `json:"fee"`
-	SettleAmount      float64 `json:"settleAmount"`
-	PayMethod         string  `json:"payMethod"`
-	ProductName       string  `json:"productName"`
-	ExternalOrderNo   *string `json:"externalOrderNo,omitempty"`
-	ThirdPartyTradeNo *string `json:"thirdPartyTradeNo,omitempty"`
-	Status            string  `json:"status"`
+	ID                  string          `json:"id"`
+	OrderNo             string          `json:"orderNo"`
+	Channel             string          `json:"channel"`
+	Amount              float64         `json:"amount"`
+	RefundedAmount      float64         `json:"refundedAmount"`
+	Fee                 float64         `json:"fee"`
+	SettleAmount        float64         `json:"settleAmount"`
+	PayMethod           string          `json:"payMethod"`
+	ProductName         string          `json:"productName"`
+	ExternalOrderNo     *string         `json:"externalOrderNo,omitempty"`
+	ThirdPartyTradeNo   *string         `json:"thirdPartyTradeNo,omitempty"`
+	Status              string          `json:"status"`
+	RefundRequestID     *string         `json:"refundRequestId,omitempty"`
+	PendingRefundAmount *float64        `json:"pendingRefundAmount,omitempty"`
+	RawStatus           int             `json:"rawStatus"`
+	ChannelCost         float64         `json:"channelCost"`
+	GroupID             *int64          `json:"groupId,omitempty"`
+	GroupName           *string         `json:"groupName,omitempty"`
+	APIKeyID            *int64          `json:"apiKeyId,omitempty"`
+	APIKeyName          *string         `json:"apiKeyName,omitempty"`
+	NotifyURL           *string         `json:"notifyUrl,omitempty"`
+	NotifyStatus        *int            `json:"notifyStatus,omitempty"`
+	NotifyRetryCount    *int64          `json:"notifyRetryCount,omitempty"`
+	NotifyLastError     *string         `json:"notifyLastError,omitempty"`
+	ClientIP            *string         `json:"clientIp,omitempty"`
+	ClientLocation      *geoip.Location `json:"clientLocation,omitempty"`
 	// 只回时间戳。相对时间（「17分钟前」）由前端的 <sp-time> 算 ——
 	// 在这儿拼字符串等于把响应那一刻钉死，页面挂着不动它永远不变，
 	// 而且用的是服务器时钟不是浏览器时区。
 	CreatedAt string  `json:"createdAt"`
+	UpdatedAt string  `json:"updatedAt"`
+	ExpireAt  string  `json:"expireAt"`
 	PayAt     *string `json:"payAt,omitempty"`
 }
 
@@ -113,8 +131,8 @@ func NewAdminService(store *db.Store) *AdminService {
 
 // GetStats 统计走 SQL 聚合而不是把行读进内存，
 // 所以不管订单表多大，应用侧都是 O(1)。
-func (s *AdminService) GetStats(groupID *int64) (*StatsResult, error) {
-	st, err := s.store.Orders.Stats(groupID)
+func (s *AdminService) GetStats(groupID *int64, scopes ...[]int64) (*StatsResult, error) {
+	st, err := s.store.Orders.Stats(groupID, scopes...)
 	if err != nil {
 		return nil, err
 	}
@@ -135,51 +153,54 @@ func (s *AdminService) GetTransactions(opts TransactionOpts) (*PageResult[Transa
 	page, pageSize, offset, limit := paginate(opts.Page, opts.PageSize)
 
 	orders, total, err := s.store.Orders.Search(db.SearchOpts{
-		GroupID:   opts.GroupID,
-		Status:    parseStatus(opts.Status),
-		PayMethod: opts.PayMethod,
-		DateFrom:  opts.DateFrom,
-		DateTo:    opts.DateTo,
-		Keyword:   opts.Keyword,
-		Offset:    offset,
-		Limit:     limit,
+		GroupID:    opts.GroupID,
+		ProjectIDs: opts.ProjectIDs,
+		Status:     parseStatus(opts.Status),
+		PayMethod:  opts.PayMethod,
+		DateFrom:   opts.DateFrom,
+		DateTo:     opts.DateTo,
+		UTCOffset:  opts.UTCOffset,
+		Keyword:    opts.Keyword,
+		Offset:     offset,
+		Limit:      limit,
 	})
 	if err != nil {
 		return nil, err
 	}
 
+	orderNos := make([]string, len(orders))
+	for i, order := range orders {
+		orderNos[i] = order.OrderNo
+	}
+	metadata, err := s.store.Orders.MetadataByOrderNos(orderNos)
+	if err != nil {
+		return nil, err
+	}
 	items := make([]TransactionItem, 0, len(orders))
 	for _, order := range orders {
-		items = append(items, TransactionItem{
-			ID:                order.ID,
-			OrderNo:           order.OrderNo,
-			Channel:           channelOf(order.PayMethod),
-			Amount:            money.ToYuan(order.Amount),
-			RefundedAmount:    money.ToYuan(order.RefundedAmount),
-			Fee:               money.ToYuan(order.Fee),
-			SettleAmount:      money.ToYuan(order.SettleAmount),
-			PayMethod:         order.PayMethod,
-			ProductName:       order.ProductName,
-			ExternalOrderNo:   order.ExternalOrderNo,
-			ThirdPartyTradeNo: order.ThirdPartyTradeNo,
-			Status:            statusOf(order.Status),
-			CreatedAt:         JsTime(order.CreatedAt),
-			PayAt:             jsTimePtr(order.PayAt),
-		})
+		items = append(items, transactionItem(order, metadata[order.OrderNo]))
 	}
 	return &PageResult[TransactionItem]{Items: items, Total: total, Page: page, PageSize: pageSize}, nil
 }
 
 // DeleteTransaction 删单。
 func (s *AdminService) DeleteTransaction(orderNo, actor string, ip *string) (*SuccessResult, error) {
-	order, err := s.store.Orders.FindByOrderNo(orderNo, false)
+	var order *db.PaymentOrder
+	err := s.store.Do(func(tx *db.TxScope) error {
+		var err error
+		order, err = tx.Orders.FindByOrderNo(orderNo, false)
+		if err != nil {
+			return err
+		}
+		if order == nil {
+			return httperr.NotFound("订单不存在")
+		}
+		if order.Status == db.StatusRefunding {
+			return httperr.Conflict("退款处理中，不能删除对账记录")
+		}
+		return tx.Orders.DeleteByOrderNo(orderNo)
+	})
 	if err != nil {
-		return nil, err
-	}
-	if order == nil {
-		return nil, httperr.NotFound("订单不存在")
-	}
-	if err := s.store.Orders.DeleteByOrderNo(orderNo); err != nil {
 		return nil, err
 	}
 	s.log.Log(fmt.Sprintf("Order %s deleted by %s%s (amount=%d channel=%s status=%d)",
@@ -188,13 +209,23 @@ func (s *AdminService) DeleteTransaction(orderNo, actor string, ip *string) (*Su
 }
 
 // GetNotificationStatus 通知列表：分页 + 状态过滤，status 保持数字。
-func (s *AdminService) GetNotificationStatus(page, pageSize, status string) (*PageResult[NotificationItem], error) {
+func (s *AdminService) GetNotificationStatus(page, pageSize, status string, orderNos ...string) (*PageResult[NotificationItem], error) {
+	return s.GetNotificationStatusScoped(nil, page, pageSize, status, orderNos...)
+}
+
+func (s *AdminService) GetNotificationStatusScoped(projectIDs []int64, page, pageSize, status string, orderNos ...string) (*PageResult[NotificationItem], error) {
 	p, size, offset, limit := paginate(page, pageSize)
+	orderNo := ""
+	if len(orderNos) > 0 {
+		orderNo = strings.TrimSpace(orderNos[0])
+	}
 
 	items, total, err := s.store.Notifies.Search(db.NotifySearchOpts{
-		Status: parseStatus(status),
-		Offset: offset,
-		Limit:  limit,
+		ProjectIDs: projectIDs,
+		Status:     parseStatus(status),
+		OrderNo:    orderNo,
+		Offset:     offset,
+		Limit:      limit,
 	})
 	if err != nil {
 		return nil, err
@@ -228,13 +259,12 @@ func (s *AdminService) ReplayNotification(id int64, actor string, ip *string) (*
 	if notify == nil {
 		return nil, httperr.NotFound("通知记录不存在")
 	}
-	if err := s.store.Notifies.Update(id, map[string]any{
-		"status":        db.NotifyPending,
-		"retryCount":    int64(0),
-		"lastAttemptAt": time.Now(),
-		"lastError":     nil,
-	}); err != nil {
+	requeued, err := s.store.Notifies.Requeue(id)
+	if err != nil {
 		return nil, err
+	}
+	if !requeued {
+		return nil, httperr.Conflict("通知投递处理中，请稍后重发")
 	}
 	s.log.Log(fmt.Sprintf("Notification %d (order %s) requeued by %s%s",
 		id, tsOpt(notify.OrderNo), actorName(actor), fromIP(ip)))
@@ -243,20 +273,36 @@ func (s *AdminService) ReplayNotification(id int64, actor string, ip *string) (*
 
 // ResetData 清空订单和通知（沙箱用）。
 func (s *AdminService) ResetData(actor string, ip *string) (*ResetResult, error) {
-	orderCount, err := s.store.Orders.Count()
+	var orderCount, notifyCount int64
+	err := s.store.Do(func(tx *db.TxScope) error {
+		active, err := tx.Refunds.CountActive()
+		if err != nil {
+			return err
+		}
+		if active != 0 {
+			return httperr.Conflict("存在在途退款，不能重置对账记录")
+		}
+		refunding, err := tx.Orders.CountByStatus(db.StatusRefunding)
+		if err != nil {
+			return err
+		}
+		if refunding != 0 {
+			return httperr.Conflict("存在在途退款，不能重置对账记录")
+		}
+		orderCount, err = tx.Orders.Count()
+		if err != nil {
+			return err
+		}
+		notifyCount, err = tx.Notifies.Count()
+		if err != nil {
+			return err
+		}
+		if err := tx.Notifies.Clear(); err != nil {
+			return err
+		}
+		return tx.Orders.Clear()
+	})
 	if err != nil {
-		return nil, err
-	}
-	notifyCount, err := s.store.Notifies.Count()
-	if err != nil {
-		return nil, err
-	}
-
-	// 先删通知（有 orderNo 引用），再删订单。
-	if err := s.store.Notifies.Clear(); err != nil {
-		return nil, err
-	}
-	if err := s.store.Orders.Clear(); err != nil {
 		return nil, err
 	}
 

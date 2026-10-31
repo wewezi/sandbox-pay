@@ -12,17 +12,22 @@ import (
 	"encoding/base64"
 
 	"github.com/skip2/go-qrcode"
+
+	"sandbox-pay/internal/services"
 )
 
-// PayResult 下单接口的回执：告诉前端往哪儿跳。
-//
-// type 只有 'url' | 'form' 两种字面量，前端 cashier.js / sandbox.js 按它分支。
-// data 一律是链接 —— 支付宝给的是签名好的 GET URL（原版是一段自提交表单，
-// 前端得先剥掉里面的 <script> 再手动 submit，因为 CSP 不让跑内联脚本），
-// cashier.js 见到 data 以 http 开头就直接 location.href。
+// PayResult 下单回执，data 为支付链接。
+// type 保留 "url" / "form" 两种值以兼容 API，二者的 data 均是 URL。
+// web/sandbox.ts 打开收银台；web/cashier.ts 校验 HTTP(S) 协议后跳转上游。
+// 支付宝返回签名好的 GET URL，不返回内联脚本或自提交表单。
 type PayResult struct {
-	Type string `json:"type"`
-	Data string `json:"data"`
+	Type       string  `json:"type"`
+	Data       string  `json:"data"`
+	OrderNo    string  `json:"orderNo,omitempty"`
+	PaymentURL string  `json:"paymentUrl,omitempty"`
+	Status     int     `json:"status"`
+	Amount     float64 `json:"amount,omitempty"`
+	ExpireAt   string  `json:"expireAt,omitempty"`
 }
 
 // CaptureResult PayPal capture 的回执。业务失败一律 {success:false, ...}，
@@ -35,31 +40,42 @@ type CaptureResult struct {
 
 // CashierPaymentInfo 自有渠道收银台展示的打款信息。
 type CashierPaymentInfo struct {
-	QRCodeURL   string `json:"qrCodeUrl"`
-	AccountName string `json:"accountName"`
-	AccountNo   string `json:"accountNo"`
-	BankName    string `json:"bankName"`
-	Remark      string `json:"remark"`
+	QRCodeURL     string `json:"qrCodeUrl"`
+	QRCodeChannel string `json:"qrCodeChannel,omitempty"`
+	AccountName   string `json:"accountName"`
+	AccountNo     string `json:"accountNo"`
+	BankName      string `json:"bankName"`
+	Remark        string `json:"remark"`
 }
 
-// CashierInfo 收银台要展示的订单快照，按 status 分三种形态：
+// CashierInfo 收银台要展示的订单快照，每个状态都给出明确的返回地址：
 //
 //	paid    —— 多出 payMethod / thirdPartyTradeNo / payAt
-//	expired —— 只有四个基础字段
-//	pending —— 多出 expireAt / paymentInfo
+//	expired / failed —— 订单基础字段和返回地址
+//	pending —— 多出 expireAt / paymentInfo / availableChannels
 //
-// 靠 omitempty 丢掉当前形态用不到的字段，对齐原版三个分支返回的三个不同
-// 对象字面量 —— 收银台页按 status 取字段，多出来的空字段会渲染成 "undefined"。
+// availableChannels lists selectable methods for a pending merchant order.
+// The selected method does not prevent choosing another one before payment.
 type CashierInfo struct {
-	OrderNo           string              `json:"orderNo"`
-	Amount            float64             `json:"amount"`
-	ProductName       string              `json:"productName"`
-	Status            string              `json:"status"` // pending | paid | expired | failed
-	PayMethod         string              `json:"payMethod,omitempty"`
-	ThirdPartyTradeNo string              `json:"thirdPartyTradeNo,omitempty"`
-	PayAt             *string             `json:"payAt,omitempty"`
-	ExpireAt          *string             `json:"expireAt,omitempty"`
-	PaymentInfo       *CashierPaymentInfo `json:"paymentInfo,omitempty"`
+	OrderNo           string                `json:"orderNo"`
+	Amount            float64               `json:"amount"`
+	ProductName       string                `json:"productName"`
+	ProjectName       string                `json:"projectName,omitempty"`
+	ExternalOrderNo   *string               `json:"externalOrderNo,omitempty"`
+	CreatedAt         string                `json:"createdAt,omitempty"`
+	ReturnURL         string                `json:"returnUrl"`
+	Status            string                `json:"status"` // pending | paid | expired | failed
+	PayMethod         string                `json:"payMethod,omitempty"`
+	AvailableChannels []string              `json:"availableChannels,omitempty"`
+	ChannelLockReason string                `json:"channelLockReason,omitempty"`
+	PayPalQuote       *services.PayPalQuote `json:"paypalQuote,omitempty"`
+	ForeignAmount     *float64              `json:"foreignAmount,omitempty"`
+	ForeignCurrency   string                `json:"foreignCurrency,omitempty"`
+	ExchangeRate      *float64              `json:"exchangeRate,omitempty"`
+	ThirdPartyTradeNo string                `json:"thirdPartyTradeNo,omitempty"`
+	PayAt             *string               `json:"payAt,omitempty"`
+	ExpireAt          *string               `json:"expireAt,omitempty"`
+	PaymentInfo       *CashierPaymentInfo   `json:"paymentInfo,omitempty"`
 }
 
 // ConfirmResult 手动核销的回执。

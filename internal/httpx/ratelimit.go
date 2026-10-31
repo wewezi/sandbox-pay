@@ -87,7 +87,7 @@ func (l *Limiter) StartCleanup(interval time.Duration) (stop func()) {
 //	name  计数键的前缀，不同路由用不同名字才能各自计数
 //	limit 窗口内允许的请求数
 //	window 窗口长度
-func RateLimit(name string, limit int, window time.Duration) Middleware {
+func RateLimit(name string, limit int, window time.Duration) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if err := DefaultLimiter.Allow(name, ClientIP(r), limit, window); err != nil {

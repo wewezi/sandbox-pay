@@ -2,6 +2,8 @@ package gateways
 
 import (
 	"fmt"
+	"math"
+	"net/url"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -19,22 +21,48 @@ import (
 // 下单只回一个收银台页面 URL，真正的「收钱」由管理员/财务在页面上核销完成；
 // payMethod=alipay 的单会在打开收银台时主动向支付宝查一次，查到就直接置为已支付。
 type NativePay struct {
-	cfg      config.Config
-	log      *logger.Logger
-	store    *db.Store
-	payments *services.PaymentService
-	alipay   *Alipay
+	cfg           config.Config
+	log           *logger.Logger
+	store         *db.Store
+	payments      *services.PaymentService
+	quotePayments *services.PaymentService
+	rates         *services.ExchangeRateService
+	alipay        cashierAlipay
+}
+
+type cashierAlipay interface {
+	QueryAlipayTrade(string) bool
 }
 
 // NewNativePay 构造。
 func NewNativePay(cfg config.Config, store *db.Store, payments *services.PaymentService,
-	alipay *Alipay) *NativePay {
+	alipay cashierAlipay, rates ...*services.ExchangeRateService) *NativePay {
+	quotePayments := payments
+	if quotePayments == nil {
+		// Query-only constructions need no settlement dependencies.
+		quotePayments = services.NewPaymentService(store, nil, nil)
+	}
+	var orderRates *services.ExchangeRateService
+	if len(rates) > 0 {
+		orderRates = rates[0]
+	}
+	if orderRates == nil {
+		// Keep legacy/test constructions local even if cfg uses a live provider.
+		orderRates = services.NewExchangeRateService(nil, config.Map{
+			"EXCHANGE_RATE_PROVIDER":     "fixed",
+			"FALLBACK_CNY_TO_USD":        config.String(cfg, "FALLBACK_CNY_TO_USD"),
+			"EXCHANGE_RATE_MARGIN":       config.String(cfg, "EXCHANGE_RATE_MARGIN"),
+			"EXCHANGE_RATE_CACHE_TTL_MS": config.String(cfg, "EXCHANGE_RATE_CACHE_TTL_MS"),
+		})
+	}
 	return &NativePay{
-		cfg:      cfg,
-		log:      logger.New("NativePayService"),
-		store:    store,
-		payments: payments,
-		alipay:   alipay,
+		cfg:           cfg,
+		log:           logger.New("NativePayService"),
+		store:         store,
+		payments:      payments,
+		quotePayments: quotePayments,
+		rates:         orderRates,
+		alipay:        alipay,
 	}
 }
 
@@ -55,7 +83,7 @@ func (n *NativePay) CreateOrder(orderNo, baseUrl string) (*PayResult, error) {
 	if clientURL == "" {
 		clientURL = baseUrl
 	}
-	cashierURL := clientURL + "/cashier.html?orderNo=" + orderNo
+	cashierURL := clientURL + "/cashier?orderNo=" + orderNo
 
 	n.log.Log(fmt.Sprintf("Native pay cashier URL generated for order: %s", orderNo))
 	return &PayResult{Type: "url", Data: cashierURL}, nil
@@ -63,7 +91,7 @@ func (n *NativePay) CreateOrder(orderNo, baseUrl string) (*PayResult, error) {
 
 // GetCashierInfo 收银台轮询用的订单快照。
 //
-// 分支顺序和原版一致：paid → expired/failed → 过期时间到 → 支付宝主动核实 → pending。
+// 已完成支付（含退款中/已退款）优先返回，之后处理关闭、到期、支付宝核实和待支付。
 func (n *NativePay) GetCashierInfo(orderNo, baseUrl string) (*CashierInfo, error) {
 	order, err := n.store.Orders.FindByOrderNo(orderNo, false)
 	if err != nil {
@@ -73,18 +101,52 @@ func (n *NativePay) GetCashierInfo(orderNo, baseUrl string) (*CashierInfo, error
 		return nil, httperr.NotFound("订单不存在")
 	}
 
-	base := func() *CashierInfo {
-		return &CashierInfo{
-			OrderNo:     order.OrderNo,
-			Amount:      money.ToYuan(order.Amount),
-			ProductName: order.ProductName,
+	// Project names identify the order's actual integration project. Missing
+	// optional metadata must not hide the order or substitute another project.
+	projectName := ""
+	if order.GroupID != nil {
+		project, err := n.store.Groups.FindByID(*order.GroupID)
+		if err != nil {
+			n.log.Warn("Cashier project metadata lookup failed; continuing without its name")
+		} else if project != nil {
+			// Copy only the display name, never credentials or the Group model.
+			projectName = strings.TrimSpace(project.Name)
 		}
 	}
 
-	if order.Status == db.StatusPaid {
+	base := func() *CashierInfo {
+		info := &CashierInfo{
+			OrderNo:     order.OrderNo,
+			Amount:      money.ToYuan(order.Amount),
+			ProductName: order.ProductName,
+			ProjectName: projectName,
+			ReturnURL:   cashierReturnURL(order.ReturnURL),
+		}
+		if order.ExternalOrderNo != nil && strings.TrimSpace(*order.ExternalOrderNo) != "" {
+			info.ExternalOrderNo = order.ExternalOrderNo
+		}
+		if !order.CreatedAt.IsZero() {
+			info.CreatedAt = services.JsTime(order.CreatedAt)
+		}
+		return info
+	}
+
+	// 退款不会让原付款重新变成待支付，也不受原支付期限影响。
+	if order.Status == db.StatusPaid || order.Status == db.StatusRefunding || order.Status == db.StatusRefunded {
 		info := base()
 		info.Status = "paid"
 		info.PayMethod = orDefault(order.PayMethod, "alipay")
+		// A paid receipt reports the persisted USD debit, including legacy
+		// payments; it must not be repriced or subjected to new quote rules.
+		if order.PayMethod == "paypal" && order.ForeignAmount != nil && *order.ForeignAmount >= 0 &&
+			order.ForeignCurrency != nil && *order.ForeignCurrency == "USD" {
+			amount := money.ToYuan(*order.ForeignAmount)
+			info.ForeignAmount = &amount
+			info.ForeignCurrency = "USD"
+			if order.ExchangeRate != nil && !math.IsNaN(*order.ExchangeRate) && !math.IsInf(*order.ExchangeRate, 0) && *order.ExchangeRate > 0 {
+				info.ExchangeRate = order.ExchangeRate
+			}
+		}
 		info.ThirdPartyTradeNo = firstNonEmpty(order.ThirdPartyTradeNo, "SP_CLEARED_"+order.OrderNo)
 		payAt := time.Now()
 		if order.PayAt != nil {
@@ -112,7 +174,7 @@ func (n *NativePay) GetCashierInfo(orderNo, baseUrl string) (*CashierInfo, error
 
 	// 主动核实支付宝状态（本地公网异步通知到不了内网时靠它兜底）。
 	// 只认 payMethod，不按订单号前缀猜 —— 所有订单号都以 PAY 开头。
-	if order.PayMethod == "alipay" && n.alipay.QueryAlipayTrade(orderNo) {
+	if order.PayMethod == "alipay" && n.alipay != nil && n.alipay.QueryAlipayTrade(orderNo) {
 		refreshed, err := n.store.Orders.FindByOrderNo(orderNo, false)
 		if err != nil || refreshed == nil {
 			refreshed = order
@@ -131,30 +193,51 @@ func (n *NativePay) GetCashierInfo(orderNo, baseUrl string) (*CashierInfo, error
 		return info, nil
 	}
 
-	// 二维码：优先用 .env 配的固定码，没配就现场找支付宝开一张。
-	qrCodeURL := config.String(n.cfg, "NATIVE_PAY_QR_URL")
-	if qrCodeURL == "" {
-		if alipayQr := n.alipay.CreateQrPay(orderNo, baseUrl); alipayQr != "" {
-			if dataURL, err := qrDataURL(alipayQr); err == nil {
-				qrCodeURL = dataURL
-			} else {
-				n.log.Error(fmt.Sprintf("QR render failed for %s: %s", orderNo, err))
-			}
+	// Reading a cashier must never create an external payment. Only the native
+	// channel's configured payment QR is available without an explicit action.
+	qrCodeURL, qrCodeChannel := "", ""
+	switch order.PayMethod {
+	case "", "native", "bank":
+		qrCodeURL = config.String(n.cfg, "NATIVE_PAY_QR_URL")
+		if qrCodeURL != "" {
+			qrCodeChannel = "native"
 		}
 	}
 
 	expireAt := services.JsTime(order.ExpireAt)
 	info := base()
 	info.Status = "pending"
+	info.PayMethod = order.PayMethod
+	quote, quoteErr := n.quotePayments.EnsurePayPalQuote(orderNo, n.rates)
+	if quoteErr != nil || quote == nil {
+		// A quote failure must not hide the order or its other payment methods.
+		quote = &services.PayPalQuote{Currency: "USD", Available: false, Reason: "PayPal 报价暂不可用，请稍后重试"}
+	}
+	info.PayPalQuote = quote
+	info.AvailableChannels, info.ChannelLockReason = services.CashierChannelCapabilities(order)
 	info.ExpireAt = &expireAt
 	info.PaymentInfo = &CashierPaymentInfo{
-		QRCodeURL:   qrCodeURL,
-		AccountName: config.String(n.cfg, "NATIVE_PAY_ACCOUNT_NAME"),
-		AccountNo:   config.String(n.cfg, "NATIVE_PAY_ACCOUNT_NO"),
-		BankName:    config.String(n.cfg, "NATIVE_PAY_BANK_NAME"),
-		Remark:      "WP" + orderNo,
+		QRCodeURL:     qrCodeURL,
+		QRCodeChannel: qrCodeChannel,
+		AccountName:   config.String(n.cfg, "NATIVE_PAY_ACCOUNT_NAME"),
+		AccountNo:     config.String(n.cfg, "NATIVE_PAY_ACCOUNT_NO"),
+		BankName:      config.String(n.cfg, "NATIVE_PAY_BANK_NAME"),
+		Remark:        "WP" + orderNo,
 	}
 	return info, nil
+}
+
+// Legacy orders can predate return URL validation. Never publish an executable
+// scheme; an order without a valid destination has an explicit local fallback.
+func cashierReturnURL(value *string) string {
+	if value != nil {
+		raw := strings.TrimSpace(*value)
+		parsed, err := url.Parse(raw)
+		if err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != "" && parsed.User == nil {
+			return parsed.String()
+		}
+	}
+	return "/sandbox"
 }
 
 // ConfirmPayment 管理员/存管钱包手动核销确认。
@@ -163,6 +246,9 @@ func (n *NativePay) GetCashierInfo(orderNo, baseUrl string) (*CashierInfo, error
 // 这里只做业务校验：订单存在且仍 Pending、渠道为 native（禁止跨渠道核销）、
 // 金额按订单原值入账（杜绝伪造金额）。
 func (n *NativePay) ConfirmPayment(orderNo, tradeNo, walletUser, walletPass string) (*ConfirmResult, error) {
+	unlock := n.payments.LockCashierChannel(orderNo)
+	defer unlock()
+
 	order, err := n.store.Orders.FindByOrderNo(orderNo, false)
 	if err != nil {
 		return nil, err
@@ -175,10 +261,13 @@ func (n *NativePay) ConfirmPayment(orderNo, tradeNo, walletUser, walletPass stri
 	}
 
 	// 严防跨渠道结算渗透：禁止用存管直联核销支付宝或 PayPal 的订单。
-	if order.PayMethod == "alipay" || order.PayMethod == "paypal" {
+	if order.PayMethod != "" && order.PayMethod != "native" && order.PayMethod != "bank" {
 		return nil, httperr.BadRequestf(
-			"该订单属于外部通道 (%s)，无法直接通过 Sandbox Pay 自有存管清算体系进行核销",
+			"该订单属于外部通道 (%s)，无法直接通过 Mintweft 自有存管清算体系进行核销",
 			order.PayMethod)
+	}
+	if !order.ExpireAt.After(time.Now()) {
+		return nil, httperr.Conflict("订单已过期，请重新下单")
 	}
 
 	// 存管钱包账号 + 安全密码：始终强校验（不允许两个都为空时绕过）。
@@ -195,9 +284,11 @@ func (n *NativePay) ConfirmPayment(orderNo, tradeNo, walletUser, walletPass stri
 		confirmedTradeNo = fmt.Sprintf("SP_WALLET_%d", time.Now().UnixMilli())
 	}
 	// 金额按订单原值入账（cents），调用方伪造不了金额。
-	if _, err := n.payments.MarkPaid(orderNo, &confirmedTradeNo, order.Amount, "CNY"); err != nil {
+	paid, err := n.payments.MarkPaidForChannel("native", orderNo, &confirmedTradeNo, order.Amount, "CNY")
+	if err != nil {
 		return nil, err
 	}
+	confirmedTradeNo = firstNonEmpty(paid.ThirdPartyTradeNo, confirmedTradeNo)
 
 	n.log.Log(fmt.Sprintf("Native payment confirmed for %s, tradeNo: %s", orderNo, confirmedTradeNo))
 	return &ConfirmResult{Success: true, OrderNo: orderNo, TradeNo: confirmedTradeNo}, nil

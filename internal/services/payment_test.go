@@ -171,6 +171,8 @@ func TestPaymentServiceMarkRefunded(t *testing.T) {
 		order := createMockPaymentOrder()
 		order.NotifyURL = strPtr("https://example.com/notify")
 		order.APIKeyID = &keyID
+		order.SigningSecret = strPtr("whsec_refund_test")
+		order.SignatureVersion = 2
 		insertOrder(t, store, order)
 		svc, notify := createPaymentService(store)
 
@@ -191,9 +193,8 @@ func TestPaymentServiceMarkRefunded(t *testing.T) {
 		if call.notification.Amount != 200 {
 			t.Errorf("notification.amount = %v, want 200 (整单 ￥200)", call.notification.Amount)
 		}
-		// 回调签名密钥就是下单那把 Key
-		if call.signingKey != "sp_test_key" {
-			t.Errorf("signingKey = %q, want sp_test_key", call.signingKey)
+		if call.signingKey != "whsec_refund_test" {
+			t.Error("refund callback must use the independent project signing snapshot")
 		}
 	})
 }

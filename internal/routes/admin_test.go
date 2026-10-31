@@ -11,6 +11,42 @@ import (
 	"testing"
 )
 
+func TestDisabledSeedKeySurvivesAdminReadsAndRestart(t *testing.T) {
+	h := newHarness(t, nil)
+	group, key, _, err := h.c.Groups.EnsureSeed()
+	if err != nil || key == nil {
+		t.Fatalf("EnsureSeed: key=%v err=%v", key, err)
+	}
+	off := h.do(t, reqSpec{
+		Method: "POST", Path: fmt.Sprintf("/v1/api/admin/api-keys/%d/toggle", key.ID), Headers: h.auth,
+	})
+	eq(t, "disable status", off.Status, http.StatusOK)
+
+	for i := 0; i < 2; i++ {
+		list := h.do(t, reqSpec{Method: "GET", Path: "/v1/api/admin/groups", Headers: h.auth})
+		eq(t, "list status", list.Status, http.StatusOK)
+		items := list.dataArr()
+		eq(t, "groups", len(items), 1)
+		keys := items[0].(map[string]any)["keys"].([]any)
+		eq(t, "keys", len(keys), 1)
+		eq(t, "key disabled", keys[0].(map[string]any)["isActive"], false)
+
+		query := h.do(t, reqSpec{Method: "GET", Path: "/v1/api/gateway/query?orderNo=NOPE", Headers: h.groupAuth})
+		eq(t, "disabled key unauthorized", query.Status, http.StatusUnauthorized)
+		if _, err := h.c.Groups.DefaultGroup(); err != nil {
+			t.Fatalf("DefaultGroup: %v", err)
+		}
+		if err := h.c.Groups.Init(); err != nil {
+			t.Fatalf("restart Init: %v", err)
+		}
+	}
+
+	keys, err := h.store.ApiKeys.ListByGroup(group.ID)
+	if err != nil || len(keys) != 1 || keys[0].IsActive {
+		t.Fatalf("disabled seed key was replaced or re-enabled: keys=%v err=%v", keys, err)
+	}
+}
+
 func TestAdminE2E(t *testing.T) {
 	h := newHarness(t, nil)
 
@@ -64,7 +100,7 @@ func TestAdminE2E(t *testing.T) {
 		eq(t, "pageSize", num(t, d["pageSize"], "pageSize"), 10)
 	})
 
-	t.Run("GET /admin/groups 返回分组列表，Key 是明文（沙箱后台要给自己抄）", func(t *testing.T) {
+	t.Run("GET /admin/groups 返回项目和令牌标识，不泄漏明文", func(t *testing.T) {
 		r := h.do(t, reqSpec{Method: "GET", Path: "/v1/api/admin/groups", Headers: h.auth})
 		eq(t, "status", r.Status, http.StatusOK)
 		items := r.dataArr()
@@ -77,7 +113,13 @@ func TestAdminE2E(t *testing.T) {
 		if !ok || len(keys) == 0 {
 			t.Fatalf("keys 为空: %#v", g["keys"])
 		}
-		eq(t, "keys[0].key", str(t, keys[0].(map[string]any)["key"], "key"), testAPIKey)
+		metadata := keys[0].(map[string]any)
+		if _, exposed := metadata["key"]; exposed {
+			t.Fatal("project list exposed token plaintext")
+		}
+		if str(t, metadata["keyPrefix"], "keyPrefix") == "" {
+			t.Fatal("project list is missing token display metadata")
+		}
 		// 合并成一个 Key 之后不该再有这两个字段漏出去
 		if _, ok := g["appKey"]; ok {
 			t.Fatal("appKey 不该出现在响应里")

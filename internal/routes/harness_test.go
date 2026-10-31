@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -64,16 +65,17 @@ func newHarness(t *testing.T, env map[string]string) *harness {
 
 	dir := t.TempDir()
 	values := map[string]string{
-		"JWT_SECRET":          "test-jwt-secret-not-for-production",
-		"JWT_EXPIRES_IN":      "60m",
-		"GROUP_API_KEY":       testAPIKey,
-		"ENABLE_SANDBOX":      "true",
-		"THROTTLE_LIMIT":      "10000",
-		"THROTTLE_TTL_MS":     "60000",
-		"FEE_RATE_NATIVE":     "0",
-		"CHANNEL_COST_NATIVE": "0",
-		"DB_FILE":             filepath.Join(dir, "test.db"),
-		"LOG_SILENT":          "1",
+		"JWT_SECRET":             "f053b1d487c92a6e735d80ba9c6142efb98a630dc47e25189d5fa03c1e7264ab",
+		"JWT_EXPIRES_IN":         "60m",
+		"GROUP_API_KEY":          testAPIKey,
+		"ENABLE_SANDBOX":         "true",
+		"EXCHANGE_RATE_PROVIDER": "fixed",
+		"THROTTLE_LIMIT":         "10000",
+		"THROTTLE_TTL_MS":        "60000",
+		"FEE_RATE_NATIVE":        "0",
+		"CHANNEL_COST_NATIVE":    "0",
+		"DB_FILE":                filepath.Join(dir, "test.db"),
+		"LOG_SILENT":             "1",
 		// ALIPAY_* / PAYPAL_* / 汇率凭证刻意不配：e2e 不碰第三方。
 	}
 	for k, v := range env {
@@ -96,8 +98,11 @@ func newHarness(t *testing.T, env map[string]string) *harness {
 	if err != nil {
 		t.Fatalf("EnsureSeed 失败: %v", err)
 	}
-	if key.Key != testAPIKey {
-		t.Fatalf("种子 Key = %q, want %q", key.Key, testAPIKey)
+	if key == nil || key.Key != "" {
+		t.Fatal("seed credential lookup must return metadata without plaintext")
+	}
+	if hit, err := store.ApiKeys.FindActiveByKey(testAPIKey); err != nil || hit == nil || hit.Key.ID != key.ID {
+		t.Fatalf("configured seed token cannot authenticate: %v", err)
 	}
 
 	// 管理员账号：cost 4 —— 只要能过 compare 就行，默认 10 会让每个用例多花几百毫秒。
@@ -105,7 +110,7 @@ func newHarness(t *testing.T, env map[string]string) *harness {
 	if err != nil {
 		t.Fatalf("bcrypt 失败: %v", err)
 	}
-	if err := store.Users.Insert(testAdmin, string(hash), db.RoleAdmin); err != nil {
+	if err := store.Users.Insert(testAdmin, string(hash), db.RoleSuperAdmin); err != nil {
 		t.Fatalf("建管理员失败: %v", err)
 	}
 	// token 走生产代码签发（ValidateUser + IssueLocalToken），不手搓 JWT。
@@ -127,22 +132,22 @@ func newHarness(t *testing.T, env map[string]string) *harness {
 		handler:  New(cfg, c, static),
 		staticOK: staticOK,
 		groupID:  group.ID,
-		apiKey:   key.Key,
+		apiKey:   testAPIKey,
 		auth: map[string]string{
 			"Authorization": "Bearer " + token.Token,
 		},
 		groupAuth: map[string]string{
 			"Content-Type":  "application/json",
-			"Authorization": "Bearer " + key.Key,
+			"Authorization": "Bearer " + testAPIKey,
 		},
 	}
 	return h
 }
 
-// testStatic 静态资源：真 public/ 目录（app.css 用例要打真的 200 + no-cache），
+// testStatic 静态资源：真 web/dist 目录（app.css 用例要打真的 200 + no-cache），
 // 目录不在就退回统一信封 404 的桩 —— 这些测试打的是 API，不是静态文件。
 func testStatic() (http.Handler, bool) {
-	if fsys := DiskFS(filepath.Join("..", "..", "public")); fsys != nil {
+	if fsys := DiskFS(filepath.Join("..", "..", "web", "dist")); fsys != nil {
 		return Static(fsys), true
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -187,7 +192,7 @@ func (h *harness) do(t *testing.T, spec reqSpec) *resp {
 	if ip == "" {
 		ip = h.nextIP()
 	}
-	req.Header.Set("X-Forwarded-For", ip)
+	req.RemoteAddr = net.JoinHostPort(ip, "12345")
 	for k, v := range spec.Headers {
 		req.Header.Set(k, v)
 	}

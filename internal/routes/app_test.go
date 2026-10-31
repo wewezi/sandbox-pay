@@ -61,9 +61,9 @@ func TestAppShell(t *testing.T) {
 	t.Run("非 HttpError 一律 500，且不把内部原文吐给客户端", func(t *testing.T) {
 		// 拿真的 httpx.H（错误处理器的 500 分支）挂一个会抛的 handler ——
 		// 没法从正常业务路径稳定触发，但它的行为（不泄漏原文）值得钉住。
-		probe := httpx.Chain(httpx.H(func(w http.ResponseWriter, r *http.Request) error {
+		probe := httpx.Correlation(httpx.H(func(w http.ResponseWriter, r *http.Request) error {
 			return errors.New("DB password is hunter2")
-		}), httpx.Correlation)
+		}))
 		rec := httptest.NewRecorder()
 		probe.ServeHTTP(rec, httptest.NewRequest("GET", "/boom", nil))
 		r := respFromRecorder(t, rec)
@@ -146,7 +146,7 @@ func TestAppShell(t *testing.T) {
 		// 少了这个头，浏览器只看到 last-modified 就按启发式自己定过期，
 		// 改完前端刷新看不到新的（得手动硬刷）。README 承诺「改完刷新即可」。
 		if !h.staticOK {
-			t.Fatal("public 目录不存在，无法测静态资源")
+			t.Fatal("web/dist 目录不存在，请先运行 npm run build")
 		}
 		r := h.do(t, reqSpec{Method: "GET", Path: "/app.css"})
 		eq(t, "status", r.Status, http.StatusOK)

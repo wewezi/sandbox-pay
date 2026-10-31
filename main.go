@@ -1,4 +1,4 @@
-// Sandbox Pay —— 一个跑在 2c2G 小机器上的支付沙箱网关。
+// Mintweft —— 一个跑在 2c2G 小机器上的支付沙箱网关。
 //
 // 全部逻辑在 internal/ 下：config/logger/money/signature/apiurl/jwt/
 // httperr/httpclient/validate/db/httpx/services/gateways/routes。
@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -24,18 +25,22 @@ import (
 	"sandbox-pay/internal/httpx"
 	"sandbox-pay/internal/logger"
 	"sandbox-pay/internal/routes"
+	"sandbox-pay/internal/services"
 )
 
-// public 把前端整个打进二进制。开发时磁盘上有 public/ 就用盘（改完即生效），
-// 部署时把单个二进制扔上去就能跑，不用再带一个前端目录。
+// 构建后的前端打进二进制，部署时不用另外安装 Node 或携带静态文件。
 //
-//go:embed all:public
-var public embed.FS
+//go:generate npm run build
+//go:embed all:web/dist
+var frontend embed.FS
 
 func main() {
 	// create-admin 是脚本不是服务：读 .env → 开库 → 建/改用户 → 退出。
 	if len(os.Args) > 1 && os.Args[1] == "create-admin" {
 		os.Exit(runCreateAdmin(os.Args[2:]))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "seed-demo" {
+		os.Exit(runSeedDemo(os.Args[2:]))
 	}
 	os.Exit(runServer())
 }
@@ -48,7 +53,10 @@ func runServer() int {
 	log := logger.New("Bootstrap")
 
 	cfg := config.EnvConfig{}
-	validateEnv(cfg)
+	if err := config.Validate(cfg); err != nil {
+		log.Error("Invalid configuration: " + err.Error())
+		return 1
+	}
 
 	packageRoot, err := os.Getwd()
 	if err != nil {
@@ -76,7 +84,7 @@ func runServer() int {
 
 	port := strings.TrimSpace(os.Getenv("PORT"))
 	if port == "" {
-		port = "3000"
+		port = "18080"
 	}
 	server := &http.Server{
 		Addr:              ":" + port,
@@ -85,7 +93,7 @@ func runServer() int {
 	}
 
 	go func() {
-		log.Log(fmt.Sprintf("Sandbox Pay listening on http://localhost:%s", port))
+		log.Log(fmt.Sprintf("Mintweft listening on http://localhost:%s", port))
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Error(fmt.Sprintf("HTTP 服务异常退出: %s", err))
 			os.Exit(1)
@@ -108,38 +116,91 @@ func runServer() int {
 	return 0
 }
 
-// staticHandler 磁盘上有 public/ 就用盘（开发时改完即生效），否则回落到 embed。
+// staticHandler 优先读取本地构建产物，否则使用二进制内嵌资源。
 func staticHandler() http.Handler {
-	if fsys := routes.DiskFS("public"); fsys != nil {
+	if fsys := routes.DiskFS("web/dist"); fsys != nil {
 		return routes.Static(fsys)
 	}
-	return routes.Static(routes.SubFS(public, "public"))
+	return routes.Static(routes.SubFS(frontend, "web/dist"))
 }
 
-// startScheduledTasks 后台定时任务：扫过期订单、发通知队列，每分钟各一次。
+// startScheduledTasks 后台定时任务：每秒处理通知和沙箱任务，每分钟扫过期订单和运行维护。
 //
 // time.Ticker 就够了：单进程、任务只是扫表，没有 cron 表达式的需求。
 func startScheduledTasks(c *routes.Container) (stop func()) {
 	log := logger.New("ScheduledTasks")
 
 	expire := time.NewTicker(time.Minute)
-	notify := time.NewTicker(time.Minute)
+	notify := time.NewTicker(time.Second)
+	sandbox := time.NewTicker(time.Second)
+	operations := time.NewTicker(time.Minute)
 	// 限流桶 5 分钟清一次（窗口最长 1 分钟，留足余量）
 	limiter := time.NewTicker(5 * time.Minute)
 	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-sandbox.C:
+				if config.Bool(c.Config, "DEMO_DATA_MODE") {
+					continue
+				}
+				err := c.RunSandboxTasks()
+				message := ""
+				if err != nil {
+					message = "场景任务执行失败"
+					log.Error(message)
+				}
+				_ = c.Store.RecordOperationRun("sandbox", message)
+			case <-done:
+				return
+			}
+		}
+	}()
+	go func() {
+		for {
+			select {
+			case now := <-operations.C:
+				if config.Bool(c.Config, "DEMO_DATA_MODE") {
+					continue
+				}
+				if err := c.Operations.RunSchedule(now); err != nil {
+					log.Error("运行维护任务失败：" + err.Error())
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
 
 	go func() {
 		for {
 			select {
 			case <-expire.C:
+				if config.Bool(c.Config, "DEMO_DATA_MODE") {
+					continue
+				}
 				closed, err := c.Store.Orders.ExpirePending(1000)
+				message := ""
+				if err != nil {
+					message = "订单过期处理失败"
+				}
+				_ = c.Store.RecordOperationRun("expiration", message)
 				if err != nil {
 					log.Error(fmt.Sprintf("Order cleanup failed: %s", err))
 				} else if closed > 0 {
 					log.Log(fmt.Sprintf("Closed %d expired orders", closed))
 				}
 			case <-notify.C:
-				if err := c.Notify.HandleNotifications(); err != nil {
+				if config.Bool(c.Config, "DEMO_DATA_MODE") {
+					continue
+				}
+				err := c.Notify.HandleNotifications()
+				message := ""
+				if err != nil {
+					message = "回调投递任务失败"
+				}
+				_ = c.Store.RecordOperationRun("notifications", message)
+				if err != nil {
 					log.Error(fmt.Sprintf("Notification dispatch failed: %s", err))
 				}
 			case <-limiter.C:
@@ -158,28 +219,48 @@ func startScheduledTasks(c *routes.Container) (stop func()) {
 		stopped = true
 		expire.Stop()
 		notify.Stop()
+		sandbox.Stop()
+		operations.Stop()
 		limiter.Stop()
 		close(done)
 	}
 }
 
-// validateEnv 启动前检查必需的环境变量。缺关键项直接退出，缺推荐项只告警。
-func validateEnv(cfg config.Config) {
-	var missing []string
-	if strings.TrimSpace(cfg.Get("JWT_SECRET")) == "" {
-		missing = append(missing, "JWT_SECRET")
+// runSeedDemo 在停止服务后清空数据库记录并重建关联演示数据。
+func runSeedDemo(args []string) int {
+	if len(args) != 1 || args[0] != "--replace" {
+		fmt.Fprintln(os.Stderr, "Usage: mintweft seed-demo --replace\n此命令清空数据库记录并重建关联演示数据，请先停止服务。")
+		return 1
 	}
-	if len(missing) > 0 {
-		fmt.Fprintf(os.Stderr,
-			"\n[ENV VALIDATION] Missing required environment variables:\n  - %s\n\nPlease set them in .env or as system environment variables.\n",
-			strings.Join(missing, "\n  - "))
-		os.Exit(1)
+	config.LoadEnv(".env")
+	cfg := config.EnvConfig{}
+	if !config.Bool(cfg, "ENABLE_SANDBOX") {
+		fmt.Fprintln(os.Stderr, "演示数据仅允许在 ENABLE_SANDBOX=true 时生成。")
+		return 1
 	}
-
-	if strings.TrimSpace(cfg.Get("GROUP_API_KEY")) == "" {
-		fmt.Fprintln(os.Stderr,
-			"[ENV VALIDATION] 未设置，会自动生成（启动日志里会打出来）:\n  - GROUP_API_KEY")
+	packageRoot, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
 	}
+	store, err := db.Open(cfg.Get("DB_FILE"), packageRoot)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer store.Close()
+	summary, err := services.SeedDemo(store, cfg, time.Now())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "生成演示数据失败：", err)
+		return 1
+	}
+	encoder := json.NewEncoder(os.Stdout)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(summary); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	return 0
 }
 
 // runCreateAdmin 创建（或重置密码）一个管理员账号。
@@ -201,8 +282,8 @@ func runCreateAdmin(args []string) int {
 
 	if username == "" || password == "" {
 		fmt.Fprintln(os.Stderr,
-			"Usage: sandbox-pay create-admin <username> <password> [role]\n"+
-				"   or: ADMIN_USERNAME=.. ADMIN_PASSWORD=.. sandbox-pay create-admin")
+			"Usage: mintweft create-admin <username> <password> [role]\n"+
+				"   or: ADMIN_USERNAME=.. ADMIN_PASSWORD=.. mintweft create-admin")
 		return 1
 	}
 	if len(username) < 3 || len(username) > 20 {
